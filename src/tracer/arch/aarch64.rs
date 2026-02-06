@@ -80,15 +80,25 @@ impl Architecture for Aarch64Arch {
     }
 }
 
+// Define user_pt_regs for aarch64
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct user_pt_regs {
+    regs: [u64; 31],
+    sp: u64,
+    pc: u64,
+    pstate: u64,
+}
+
 pub fn read_registers(pid: Pid) -> Result<UserRegs> {
     use std::mem;
 
     // On aarch64, use PTRACE_GETREGSET with NT_PRSTATUS
-    let mut regs: libc::user_pt_regs = unsafe { mem::zeroed() };
+    let mut regs: user_pt_regs = unsafe { mem::zeroed() };
     
     let iov = libc::iovec {
         iov_base: &mut regs as *mut _ as *mut libc::c_void,
-        iov_len: mem::size_of::<libc::user_pt_regs>(),
+        iov_len: mem::size_of::<user_pt_regs>(),
     };
 
     let res = unsafe {
@@ -116,7 +126,7 @@ pub fn read_registers(pid: Pid) -> Result<UserRegs> {
 }
 
 pub fn write_registers(pid: Pid, regs: &UserRegs) -> Result<()> {
-    let libc_regs = libc::user_pt_regs {
+    let libc_regs = user_pt_regs {
         regs: regs.regs,
         sp: regs.sp,
         pc: regs.pc,
@@ -125,7 +135,7 @@ pub fn write_registers(pid: Pid, regs: &UserRegs) -> Result<()> {
 
     let iov = libc::iovec {
         iov_base: &libc_regs as *const _ as *mut libc::c_void,
-        iov_len: std::mem::size_of::<libc::user_pt_regs>(),
+        iov_len: std::mem::size_of::<user_pt_regs>(),
     };
 
     let res = unsafe {

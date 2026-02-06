@@ -76,7 +76,7 @@ pub enum TracerError {
     #[error("Architecture not supported: {0}")]
     UnsupportedArch(String),
 
-    #[error("Process {pid} not found in state map")]
+    #[error("Process {0} not found in state map")]
     ProcessNotFound(i32),
 }
 

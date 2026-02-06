@@ -136,9 +136,10 @@ impl Tracer {
 
         // Main event loop
         let result = self.trace_loop();
+        let exit_code = result.as_ref().copied().unwrap_or(-1);
 
         // Emit summary
-        self.emit_summary(result.unwrap_or(-1));
+        self.emit_summary(exit_code);
 
         result.map_err(|e| e.into())
     }
@@ -216,19 +217,23 @@ impl Tracer {
                     .unwrap_or("unknown")
                     .to_string();
 
-                state.current_syscall = Some(syscalls::SyscallInfo {
-                    number: syscall_nr,
-                    name: syscall_name.clone(),
-                    args,
-                    start_time: Instant::now(),
-                });
-
-                // Determine action based on policy
+                // Determine action based on policy (before mutable borrow of state)
                 let action = if self.trace_only {
                     PolicyAction::Allow
                 } else {
                     self.evaluate_syscall_policy(pid, syscall_nr, &syscall_name, &args)
                 };
+
+                // Now update state
+                let state = self.process_states.get_mut(&pid)
+                    .ok_or_else(|| TracerError::ProcessNotFound(pid.as_raw()))?;
+
+                state.current_syscall = Some(state::SyscallInfo {
+                    number: syscall_nr,
+                    name: syscall_name.clone(),
+                    args,
+                    start_time: Instant::now(),
+                });
 
                 state.pending_action = action;
 

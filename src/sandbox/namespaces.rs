@@ -11,17 +11,17 @@ pub fn setup_user_namespace() -> Result<()> {
     // Map current UID to 0 (root) inside the namespace
     let uid = Uid::current();
     let uid_map = format!("0 {} 1\n", uid);
-    fs::write("/proc/self/uid_map", uid_map).map_err(|e| {
-        SandboxError::NamespaceCreation(nix::Error::from(e))
-    })?;
+    if let Err(e) = fs::write("/proc/self/uid_map", uid_map) {
+        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(e.raw_os_error().unwrap_or(1))).into());
+    }
 
     // Set up gid_map - need to disable setgroups first for unprivileged user
     let _ = fs::write("/proc/self/setgroups", "deny");
     
     let gid_map = format!("0 {} 1\n", uid);
-    fs::write("/proc/self/gid_map", gid_map).map_err(|e| {
-        SandboxError::NamespaceCreation(nix::Error::from(e))
-    })?;
+    if let Err(e) = fs::write("/proc/self/gid_map", gid_map) {
+        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(e.raw_os_error().unwrap_or(1))).into());
+    }
 
     Ok(())
 }
@@ -31,13 +31,19 @@ pub fn setup_mount_namespace() -> Result<()> {
     unshare(CloneFlags::CLONE_NEWNS).map_err(SandboxError::NamespaceCreation)?;
 
     // Make all mounts private to prevent propagation
-    nix::mount::mount(
-        None::<&str>,
-        "/",
-        None::<&str>,
-        nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
-        None::<&str>,
-    ).map_err(|e| SandboxError::NamespaceCreation(e))?;
+    let res = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            "/".as_ptr() as *const libc::c_char,
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+
+    if res < 0 {
+        return Err(SandboxError::NamespaceCreation(nix::Error::last()).into());
+    }
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 use super::memory::{read_memory, read_string};
 use crate::tracer::TraceStats;
 use nix::unistd::Pid;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// Decode syscall arguments based on syscall name
@@ -10,8 +10,8 @@ pub fn decode_syscall_args(
     name: &str,
     args: &[u64; 6],
     stats: &mut TraceStats,
-) -> Option<Map<String, Value>> {
-    let mut decoded = Map::new();
+) -> Option<HashMap<String, Value>> {
+    let mut decoded = HashMap::new();
 
     match name {
         "openat" | "open" => {
@@ -182,7 +182,7 @@ pub fn decode_syscall_args(
 }
 
 fn dirfd_to_string(dirfd: u64) -> Value {
-    if dirfd as i64 == libc::AT_FDCWD {
+    if dirfd as i64 == libc::AT_FDCWD as i64 {
         Value::String("AT_FDCWD".to_string())
     } else {
         (dirfd as i64).into()

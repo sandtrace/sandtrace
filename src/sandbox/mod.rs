@@ -1,10 +1,6 @@
 use crate::cli::RunArgs;
 use crate::error::{Result, SandboxError};
-use crate::policy::{Policy, PathAccess};
-use nix::sched::{unshare, CloneFlags};
-use nix::unistd::{fork, ForkResult};
-use std::os::unix::process::CommandExt;
-use std::process::Command;
+use crate::policy::{Policy};
 
 pub mod capabilities;
 pub mod landlock;
@@ -75,11 +71,14 @@ pub fn apply_child_sandbox(config: &SandboxConfig) -> Result<()> {
 }
 
 fn setup_ptrace_traceme() -> Result<()> {
-    nix::sys::ptrace::traceme().map_err(|e| SandboxError::Ptrace(e).into())?;
+    if let Err(e) = nix::sys::ptrace::traceme() {
+        return Err(SandboxError::Ptrace(e).into());
+    }
 
     // Raise SIGSTOP to wait for tracer to attach
-    nix::sys::signal::raise(nix::sys::signal::SIGSTOP)
-        .map_err(|e| SandboxError::Ptrace(e).into())?;
+    if let Err(e) = nix::sys::signal::raise(nix::sys::signal::SIGSTOP) {
+        return Err(SandboxError::Ptrace(e).into());
+    }
 
     Ok(())
 }

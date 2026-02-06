@@ -1,0 +1,50 @@
+# Policy for auditing composer install/update operations
+[filesystem]
+allow_read = [
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/etc/ld.so.cache",
+    "/etc/localtime",
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/ssl",
+    "/etc/php",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/urandom",
+    "/proc/self",
+]
+allow_write = [
+    "./vendor",
+    "./composer.lock",
+    "/tmp",
+]
+allow_exec = [
+    "/usr/bin/php",
+    "/usr/local/bin/php",
+    "/usr/bin/composer",
+    "/usr/local/bin/composer",
+    "/usr/bin/git",
+]
+deny = [
+    "/home/*/.ssh",
+    "/etc/shadow",
+    "/etc/gshadow",
+    "**/.env",
+    "/root",
+    "**/.git/config",
+]
+
+[network]
+# composer needs network to download packages from packagist
+allow = true
+
+[syscalls]
+deny = ["mount", "umount2", "ptrace"]
+log_only = ["connect", "bind", "execve"]
+
+[limits]
+timeout = 180
+max_processes = 32

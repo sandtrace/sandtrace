@@ -1,53 +1,45 @@
+use crate::error::Result;
+use crate::event::TraceEvent;
+use std::io::Write;
+
 pub mod jsonl;
 pub mod terminal;
 
-use std::path::Path;
-
-use anyhow::Result;
-
-use crate::event::TraceEvent;
-use jsonl::JsonlSink;
-use terminal::TerminalSink;
-
-/// Trait for output destinations.
-pub trait OutputSink {
-    fn emit(&mut self, event: &TraceEvent) -> Result<()>;
+pub trait OutputSink: Send {
+    fn emit_event(&mut self, event: TraceEvent) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
 }
 
-/// Multiplexes events to multiple sinks.
 pub struct OutputManager {
     sinks: Vec<Box<dyn OutputSink>>,
 }
 
 impl OutputManager {
-    pub fn new(
-        output_path: Option<&Path>,
-        no_color: bool,
-        verbosity: u8,
-    ) -> Result<Self> {
+    pub fn new(jsonl_output: Option<std::fs::File>, terminal_verbosity: u8, no_color: bool) -> Self {
         let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+        let output_to_file = jsonl_output.is_some();
 
-        // Terminal sink always goes to stderr
-        sinks.push(Box::new(TerminalSink::new(verbosity, no_color)));
-
-        // JSONL sink goes to file or stdout
-        match output_path {
-            Some(path) => {
-                let file = std::fs::File::create(path)?;
-                sinks.push(Box::new(JsonlSink::new_file(file)));
-            }
-            None => {
-                sinks.push(Box::new(JsonlSink::new_stdout()));
-            }
+        // Always add JSONL output (stdout or file)
+        if let Some(file) = jsonl_output {
+            sinks.push(Box::new(jsonl::JsonlWriter::new(file)));
+        } else {
+            sinks.push(Box::new(jsonl::JsonlWriter::new(std::io::stdout())));
         }
 
-        Ok(Self { sinks })
+        // Add terminal output for human readability
+        if terminal_verbosity > 0 || output_to_file {
+            sinks.push(Box::new(terminal::TerminalWriter::new(
+                terminal_verbosity,
+                no_color,
+            )));
+        }
+
+        Self { sinks }
     }
 
-    pub fn emit(&mut self, event: TraceEvent) -> Result<()> {
+    pub fn emit_event(&mut self, event: TraceEvent) -> Result<()> {
         for sink in &mut self.sinks {
-            sink.emit(&event)?;
+            sink.emit_event(event.clone())?;
         }
         Ok(())
     }
@@ -57,5 +49,11 @@ impl OutputManager {
             sink.flush()?;
         }
         Ok(())
+    }
+}
+
+impl Default for OutputManager {
+    fn default() -> Self {
+        Self::new(None, 1, false)
     }
 }

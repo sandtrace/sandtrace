@@ -9,7 +9,8 @@ pub fn parse_policy_file(path: &Path) -> Result<Policy> {
         source: e,
     })?;
 
-    let policy: Policy = toml::from_str(&content)?;
+    let policy: Policy = toml::from_str(&content)
+        .map_err(|e| PolicyError::Parse(e))?;
     Ok(policy)
 }
 

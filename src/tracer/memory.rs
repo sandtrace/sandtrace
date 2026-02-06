@@ -1,5 +1,4 @@
 use crate::error::{Result, TracerError};
-use nix::sys::uio::{process_vm_readv, RemoteIoVec};
 use nix::unistd::Pid;
 
 /// Read data from tracee's memory
@@ -21,22 +20,36 @@ pub fn read_memory(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
 fn read_memory_process_vm(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
 
-    let local_iov = [nix::sys::uio::IoVec::from_mut_slice(&mut buf)];
-    let remote_iov = [RemoteIoVec {
-        base: addr as usize,
-        len,
-    }];
+    // Create local iovec using libc::iovec directly
+    let local_iov = libc::iovec {
+        iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        iov_len: len,
+    };
+    let remote_iov = libc::iovec {
+        iov_base: addr as *mut libc::c_void,
+        iov_len: len,
+    };
 
-    match process_vm_readv(pid, &local_iov, &remote_iov) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(buf)
-        }
-        Err(e) => Err(TracerError::MemoryRead {
+    let res = unsafe {
+        libc::process_vm_readv(
+            pid.as_raw(),
+            &local_iov,
+            1,
+            &remote_iov,
+            1,
+            0,
+        )
+    };
+
+    if res < 0 {
+        return Err(TracerError::MemoryRead {
             addr,
-            source: Box::new(std::io::Error::from(e)),
-        }.into()),
+            source: Box::new(std::io::Error::last_os_error()),
+        }.into());
     }
+
+    buf.truncate(res as usize);
+    Ok(buf)
 }
 
 fn read_memory_ptrace(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {

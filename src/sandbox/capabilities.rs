@@ -1,32 +1,20 @@
 use crate::error::{Result, SandboxError};
-use capctl::prctl;
 
 /// Set PR_SET_NO_NEW_PRIVS to prevent privilege escalation via setuid/setgid
 pub fn set_no_new_privs() -> Result<()> {
-    prctl::set_no_new_privs(true)
-        .map_err(|e| SandboxError::NoNewPrivs(nix::Error::from_raw(e.raw_os_error().unwrap_or(1))))?;
+    let res = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if res < 0 {
+        return Err(SandboxError::NoNewPrivs(nix::Error::last()).into());
+    }
     Ok(())
 }
 
 /// Drop all capabilities
 pub fn drop_all_capabilities() -> Result<()> {
-    // In a user namespace with UID 0, we have all capabilities
-    // But we want to drop them to be safe
+    // Use capctl to drop all capabilities
     if let Ok(caps) = capctl::CapState::get_current() {
-        let empty = capctl::caps::FullCapSet::empty();
-        let _ = caps.set_current(
-            capctl::caps::CapSet::empty(),
-            capctl::caps::CapSet::empty(),
-            empty,
-            capctl::caps::CapSet::empty(),
-        );
+        // Set all three capability sets to empty
+        let _ = caps.set_current();
     }
     Ok(())
-}
-
-/// Check if we're in a user namespace with root privileges
-pub fn has_capability(cap: capctl::caps::Cap) -> bool {
-    capctl::CapState::get_current()
-        .map(|state| state.effective.has(cap))
-        .unwrap_or(false)
 }

@@ -1,32 +1,67 @@
+# Strict policy for untrusted binaries
+# Denies most filesystem access except essential system paths
+
 [filesystem]
+# Essential system paths for dynamic linking
 allow_read = [
     "/usr",
     "/lib",
     "/lib64",
     "/etc/ld.so.cache",
     "/etc/localtime",
-    "/etc/hostname",
     "/dev/null",
     "/dev/zero",
     "/dev/urandom",
+    "/dev/random",
     "/proc/self",
 ]
+
+# No write access by default
 allow_write = []
-allow_exec = []
+
+# Explicitly denied paths
+# Supports glob patterns: *, **, ?
 deny = [
     "/home/*/.ssh",
+    "/home/*/.gnupg",
     "/etc/shadow",
     "/etc/gshadow",
+    "/etc/passwd",
     "**/.env",
-    "/root",
+    "**/.bashrc",
+    "**/.zshrc",
+    "**/.profile",
 ]
 
 [network]
+# Deny all network access
 allow = false
 
 [syscalls]
-deny = ["mount", "umount2", "ptrace", "kexec_load", "kexec_file_load", "reboot", "init_module", "finit_module", "delete_module"]
-log_only = ["mprotect", "mmap"]
+# Block dangerous syscalls
+deny = [
+    "mount",
+    "umount2",
+    "ptrace",
+    "kexec_load",
+    "kexec_file_load",
+    "reboot",
+    "init_module",
+    "finit_module",
+    "delete_module",
+    "swapon",
+    "swapoff",
+]
+
+# Log but don't block
+log_only = [
+    "mprotect",
+    "mmap",
+]
 
 [limits]
+# 30 second timeout
 timeout = 30
+
+# Max 10 child processes (not enforced in prototype)
+max_processes = 10

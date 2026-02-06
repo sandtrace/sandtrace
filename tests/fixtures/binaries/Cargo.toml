@@ -1,0 +1,27 @@
+[package]
+name = "sandtrace-fixtures"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "read_file"
+path = "src/bin/read_file.rs"
+
+[[bin]]
+name = "connect_out"
+path = "src/bin/connect_out.rs"
+
+[[bin]]
+name = "fork_child"
+path = "src/bin/fork_child.rs"
+
+[[bin]]
+name = "try_mount"
+path = "src/bin/try_mount.rs"
+
+[[bin]]
+name = "busy_loop"
+path = "src/bin/busy_loop.rs"

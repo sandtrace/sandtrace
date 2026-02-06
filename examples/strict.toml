@@ -1,0 +1,32 @@
+[filesystem]
+allow_read = [
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/etc/ld.so.cache",
+    "/etc/localtime",
+    "/etc/hostname",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/urandom",
+    "/proc/self",
+]
+allow_write = []
+allow_exec = []
+deny = [
+    "/home/*/.ssh",
+    "/etc/shadow",
+    "/etc/gshadow",
+    "**/.env",
+    "/root",
+]
+
+[network]
+allow = false
+
+[syscalls]
+deny = ["mount", "umount2", "ptrace", "kexec_load", "kexec_file_load", "reboot", "init_module", "finit_module", "delete_module"]
+log_only = ["mprotect", "mmap"]
+
+[limits]
+timeout = 30

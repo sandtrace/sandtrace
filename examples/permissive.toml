@@ -1,0 +1,16 @@
+# Permissive policy - allow most operations, just log everything
+[filesystem]
+allow_read = ["/"]
+allow_write = ["/tmp", "/var/tmp"]
+allow_exec = ["**"]
+deny = ["/home/*/.ssh", "/etc/shadow"]
+
+[network]
+allow = true
+
+[syscalls]
+deny = ["kexec_load", "kexec_file_load", "reboot"]
+log_only = ["mprotect", "mmap", "connect", "bind"]
+
+[limits]
+timeout = 60

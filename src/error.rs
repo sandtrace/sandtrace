@@ -14,6 +14,18 @@ pub enum SandtraceError {
     #[error("Output error: {0}")]
     Output(#[from] OutputError),
 
+    #[error("Watch error: {0}")]
+    Watch(#[from] WatchError),
+
+    #[error("Rule error: {0}")]
+    Rule(#[from] RuleError),
+
+    #[error("Alert error: {0}")]
+    Alert(#[from] AlertError),
+
+    #[error("Audit error: {0}")]
+    Audit(#[from] AuditError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -110,6 +122,75 @@ pub enum OutputError {
 
     #[error("JSON serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+}
+
+// --- EDR error types ---
+
+#[derive(Error, Debug)]
+pub enum WatchError {
+    #[error("Inotify initialization failed: {0}")]
+    InotifyInit(#[source] std::io::Error),
+
+    #[error("Failed to add watch on {path}: {source}")]
+    WatchAdd {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to read inotify events: {0}")]
+    WatchRead(#[source] std::io::Error),
+
+    #[error("Daemon fork failed: {0}")]
+    DaemonFork(String),
+}
+
+#[derive(Error, Debug)]
+pub enum RuleError {
+    #[error("Failed to parse YAML rule: {0}")]
+    YamlParse(String),
+
+    #[error("Invalid rule definition: {0}")]
+    InvalidRule(String),
+
+    #[error("Invalid regex pattern '{pattern}': {source}")]
+    InvalidRegex {
+        pattern: String,
+        #[source]
+        source: regex::Error,
+    },
+
+    #[error("Failed to read rule file {path}: {source}")]
+    FileRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Error, Debug)]
+pub enum AlertError {
+    #[error("Desktop notification failed: {0}")]
+    DesktopNotification(String),
+
+    #[error("Webhook send failed: {0}")]
+    WebhookSend(String),
+
+    #[error("Syslog write failed: {0}")]
+    SyslogWrite(#[source] std::io::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum AuditError {
+    #[error("Scan failed for {path}: {reason}")]
+    ScanFailed { path: String, reason: String },
+
+    #[error("Failed to read file {path}: {source}")]
+    FileRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, SandtraceError>;

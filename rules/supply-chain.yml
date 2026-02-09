@@ -1,0 +1,72 @@
+rules:
+  - id: supply-chain-node-modules
+    name: Node Modules Tampering
+    severity: critical
+    description: Direct write to node_modules outside of package manager
+    detection:
+      file_paths:
+        - "**/node_modules/**"
+      excluded_processes:
+        - npm
+        - npx
+        - pnpm
+        - yarn
+        - node
+    alert:
+      channels: [stdout, desktop]
+      message: "node_modules tampered by {process_name} (PID: {pid}) — {path}"
+    tags: [supply-chain, node]
+
+  - id: supply-chain-npmrc-write
+    name: .npmrc Modification
+    severity: high
+    description: Unexpected modification of .npmrc registry configuration
+    detection:
+      file_paths:
+        - "**/.npmrc"
+        - "~/.npmrc"
+      excluded_processes:
+        - npm
+        - npx
+    tags: [supply-chain, npm]
+
+  - id: supply-chain-pip-conf
+    name: pip Configuration Modification
+    severity: high
+    description: Unexpected modification of pip configuration
+    detection:
+      file_paths:
+        - "~/.pip/pip.conf"
+        - "~/.config/pip/pip.conf"
+      excluded_processes:
+        - pip
+        - pip3
+    tags: [supply-chain, python]
+
+  - id: supply-chain-cargo-registry
+    name: Cargo Registry Tampering
+    severity: critical
+    description: Direct modification of Cargo registry cache
+    detection:
+      file_paths:
+        - "~/.cargo/registry/**"
+      excluded_processes:
+        - cargo
+        - rustup
+    alert:
+      channels: [stdout, desktop]
+      message: "Cargo registry tampered by {process_name} (PID: {pid})"
+    tags: [supply-chain, rust]
+
+  - id: supply-chain-composer
+    name: Composer Configuration Modification
+    severity: high
+    description: Unexpected modification of Composer configuration
+    detection:
+      file_paths:
+        - "~/.composer/config.json"
+        - "~/.config/composer/config.json"
+      excluded_processes:
+        - composer
+        - php
+    tags: [supply-chain, php]

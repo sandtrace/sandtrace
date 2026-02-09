@@ -1,0 +1,32 @@
+rules:
+  - id: exfil-curl-unknown
+    name: Curl to External Host
+    severity: medium
+    description: curl/wget making outbound request during build or install
+    detection:
+      process_names:
+        - curl
+        - wget
+      condition: "process_spawn AND process_name IN names"
+    tags: [exfiltration, network]
+
+  - id: exfil-dns-unusual
+    name: DNS Over Unusual Port
+    severity: high
+    description: DNS traffic on non-standard port may indicate data exfiltration
+    detection:
+      process_names: []
+      content_patterns:
+        - "\\b(?:[a-z0-9]{60,}\\.)+[a-z]{2,6}\\b"
+      condition: "network AND unusual_dns_port"
+    tags: [exfiltration, dns]
+
+  - id: exfil-base64-pipe
+    name: Base64 Encode and Network Send
+    severity: high
+    description: Process piping base64-encoded data to network tool
+    detection:
+      process_names:
+        - base64
+      condition: "process_spawn AND piped_to_network"
+    tags: [exfiltration, encoding]

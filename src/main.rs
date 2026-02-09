@@ -3,13 +3,20 @@ use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod alert;
+mod audit;
 mod cli;
 mod error;
 mod event;
 mod output;
 mod policy;
+mod process;
+mod rules;
 mod sandbox;
+#[cfg(feature = "telemetry")]
+mod telemetry;
 mod tracer;
+mod watch;
 
 use cli::{Cli, Commands};
 use output::OutputManager;
@@ -31,6 +38,16 @@ fn main() -> anyhow::Result<()> {
         Commands::Run(args) => {
             args.validate().context("Invalid arguments")?;
             run_sandbox(args)?;
+        }
+        Commands::Watch(args) => {
+            let rt = tokio::runtime::Runtime::new()
+                .context("Failed to create async runtime")?;
+            rt.block_on(watch::run_watch(args))
+                .context("Watch mode failed")?;
+        }
+        Commands::Audit(args) => {
+            audit::run_audit(args)
+                .context("Audit failed")?;
         }
     }
 

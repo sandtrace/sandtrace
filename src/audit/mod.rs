@@ -1,0 +1,270 @@
+pub mod scanner;
+pub mod shai_hulud;
+
+use crate::cli::AuditArgs;
+use crate::error::SandtraceError;
+use crate::event::{AuditFinding, Severity};
+use crate::rules::RuleRegistry;
+use colored::Colorize;
+use std::path::{Path, PathBuf};
+
+pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
+    args.validate().map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
+
+    // Load rules
+    let mut registry = RuleRegistry::new();
+    registry.load_builtins();
+
+    let rules_dir = expand_tilde(&args.rules);
+    if rules_dir.exists() {
+        registry.load_directory(&rules_dir)?;
+    }
+
+    let min_severity = args.min_severity();
+
+    eprintln!(
+        "Sandtrace audit: scanning {} (min severity: {})",
+        args.target.display(),
+        min_severity
+    );
+
+    // Collect files to scan
+    let files = collect_files(&args.target);
+    eprintln!("Found {} files to scan", files.len());
+
+    // Run all scanners
+    let mut findings: Vec<AuditFinding> = Vec::new();
+
+    for file_path in &files {
+        // Shai-Hulud whitespace/obfuscation scanner
+        match shai_hulud::scan_file(file_path) {
+            Ok(mut file_findings) => findings.append(&mut file_findings),
+            Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
+        }
+
+        // Content scanner (credential patterns)
+        match scanner::scan_file_content(file_path) {
+            Ok(mut file_findings) => findings.append(&mut file_findings),
+            Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
+        }
+    }
+
+    // Supply-chain scanner
+    let mut supply_findings = scanner::scan_supply_chain(&args.target);
+    findings.append(&mut supply_findings);
+
+    // Filter by severity
+    findings.retain(|f| f.severity >= min_severity);
+
+    // Sort by severity (critical first)
+    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+
+    // Output results
+    match args.format {
+        crate::cli::AuditFormat::Terminal => print_terminal_report(&findings),
+        crate::cli::AuditFormat::Json => print_json_report(&findings)?,
+        crate::cli::AuditFormat::Sarif => print_sarif_report(&findings)?,
+    }
+
+    let critical_count = findings.iter().filter(|f| f.severity == Severity::Critical).count();
+    let high_count = findings.iter().filter(|f| f.severity == Severity::High).count();
+
+    eprintln!(
+        "\nAudit complete: {} findings ({} critical, {} high)",
+        findings.len(),
+        critical_count,
+        high_count
+    );
+
+    if critical_count > 0 {
+        std::process::exit(2);
+    } else if high_count > 0 {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn collect_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, &mut files, 0);
+    files
+}
+
+fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 20 {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden directories, node_modules, .git, target
+        if name_str.starts_with('.') && path.is_dir() {
+            continue;
+        }
+        if matches!(
+            name_str.as_ref(),
+            "node_modules" | "target" | "vendor" | ".git" | "__pycache__" | "dist" | "build"
+        ) {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_files_recursive(&path, files, depth + 1);
+        } else if path.is_file() {
+            // Only scan text-like files (skip binaries by extension)
+            if is_scannable(&path) {
+                files.push(path);
+            }
+        }
+    }
+}
+
+fn is_scannable(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    // Include common source/config file extensions
+    matches!(
+        ext,
+        "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"
+            | "py" | "rb" | "php" | "go" | "rs" | "java" | "kt" | "swift" | "c" | "cpp" | "h"
+            | "sh" | "bash" | "zsh" | "fish"
+            | "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "cfg" | "conf"
+            | "env" | "env.local" | "env.production"
+            | "md" | "txt" | "csv"
+            | "html" | "css" | "scss" | "sass" | "less"
+            | "sql" | "graphql" | "gql"
+            | "dockerfile" | "makefile" | "gemfile" | "rakefile"
+    ) || path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| {
+            matches!(
+                n.to_lowercase().as_str(),
+                ".env"
+                    | ".npmrc"
+                    | ".yarnrc"
+                    | "package.json"
+                    | "package-lock.json"
+                    | "composer.json"
+                    | "cargo.toml"
+                    | "requirements.txt"
+                    | "pipfile"
+                    | "gemfile"
+                    | "dockerfile"
+                    | "makefile"
+                    | ".gitignore"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn print_terminal_report(findings: &[AuditFinding]) {
+    if findings.is_empty() {
+        eprintln!("{}", "No findings.".green());
+        return;
+    }
+
+    eprintln!("\n{}", "AUDIT FINDINGS".bold());
+    eprintln!("{}", "─".repeat(70));
+
+    for finding in findings {
+        let severity = match finding.severity {
+            Severity::Info => "INFO".normal(),
+            Severity::Low => "LOW".blue(),
+            Severity::Medium => "MEDIUM".yellow(),
+            Severity::High => "HIGH".red(),
+            Severity::Critical => "CRITICAL".red().bold(),
+        };
+
+        let location = if let Some(line) = finding.line_number {
+            format!("{}:{}", finding.file_path, line)
+        } else {
+            finding.file_path.clone()
+        };
+
+        eprintln!(
+            "  {} {} — {} [{}]",
+            severity,
+            location.yellow(),
+            finding.description,
+            finding.rule_id.dimmed()
+        );
+
+        if !finding.context_lines.is_empty() {
+            for line in &finding.context_lines {
+                eprintln!("    {}", line.dimmed());
+            }
+        }
+    }
+
+    eprintln!("{}", "─".repeat(70));
+}
+
+fn print_json_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
+    let json = serde_json::to_string_pretty(findings)
+        .map_err(|e| SandtraceError::InvalidArgument(format!("JSON serialization failed: {}", e)))?;
+    println!("{}", json);
+    Ok(())
+}
+
+fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
+    let sarif = serde_json::json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "sandtrace",
+                    "version": "0.2.0",
+                    "informationUri": "https://github.com/example/sandtrace"
+                }
+            },
+            "results": findings.iter().map(|f| {
+                serde_json::json!({
+                    "ruleId": f.rule_id,
+                    "level": match f.severity {
+                        Severity::Critical | Severity::High => "error",
+                        Severity::Medium => "warning",
+                        _ => "note",
+                    },
+                    "message": { "text": f.description },
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": { "uri": f.file_path },
+                            "region": {
+                                "startLine": f.line_number.unwrap_or(1)
+                            }
+                        }
+                    }]
+                })
+            }).collect::<Vec<_>>()
+        }]
+    });
+
+    let json = serde_json::to_string_pretty(&sarif)
+        .map_err(|e| SandtraceError::InvalidArgument(format!("SARIF serialization failed: {}", e)))?;
+    println!("{}", json);
+    Ok(())
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(format!("{}{}", home, &path_str[1..]));
+        }
+    }
+    path.to_path_buf()
+}

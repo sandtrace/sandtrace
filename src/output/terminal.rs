@@ -1,6 +1,9 @@
 use super::OutputSink;
 use crate::error::Result;
-use crate::event::{PolicyAction, ProcessEvent, SyscallCategory, SyscallEvent, TraceEvent, TraceSummary};
+use crate::event::{
+    AuditFinding, FileAccessEvent, PolicyAction, ProcessEvent, RuleMatchEvent, Severity,
+    SyscallCategory, SyscallEvent, TraceEvent, TraceSummary,
+};
 use colored::Colorize;
 use std::io::Write;
 
@@ -173,6 +176,68 @@ impl TerminalWriter {
         lines.push(format!("{}", "─".repeat(60)).dimmed().to_string());
         lines.join("\n")
     }
+
+    fn format_file_access_event(&self, event: &FileAccessEvent) -> String {
+        let ts = self.format_timestamp(event.timestamp);
+        let access = match event.access_type {
+            crate::event::FileAccessType::Read => "READ".yellow(),
+            crate::event::FileAccessType::Write => "WRITE".red(),
+            crate::event::FileAccessType::Delete => "DELETE".red().bold(),
+            crate::event::FileAccessType::Chmod => "CHMOD".magenta(),
+            crate::event::FileAccessType::Create => "CREATE".green(),
+        };
+        let proc_info = if let Some(ref name) = event.process_name {
+            format!(" by {} (pid: {})", name.cyan(), event.pid.map_or("?".to_string(), |p| p.to_string()))
+        } else {
+            String::new()
+        };
+        format!("{} {} {} {}{}", ts.dimmed(), "FILE".blue().bold(), access, event.path.yellow(), proc_info)
+    }
+
+    fn format_rule_match_event(&self, event: &RuleMatchEvent) -> String {
+        let ts = self.format_timestamp(event.timestamp);
+        let severity = Self::format_severity(event.severity);
+        let proc_info = if let Some(ref name) = event.process_name {
+            format!(" [{}]", name.cyan())
+        } else {
+            String::new()
+        };
+        format!(
+            "{} {} {} {}{} — {}",
+            ts.dimmed(),
+            "ALERT".red().bold(),
+            severity,
+            event.rule_name.bold(),
+            proc_info,
+            event.description
+        )
+    }
+
+    fn format_audit_finding(finding: &AuditFinding) -> String {
+        let severity = Self::format_severity(finding.severity);
+        let location = if let Some(line) = finding.line_number {
+            format!("{}:{}", finding.file_path, line)
+        } else {
+            finding.file_path.clone()
+        };
+        format!(
+            "  {} {} — {} [{}]",
+            severity,
+            location.yellow(),
+            finding.description,
+            finding.rule_id.dimmed()
+        )
+    }
+
+    fn format_severity(severity: Severity) -> colored::ColoredString {
+        match severity {
+            Severity::Info => "INFO".normal(),
+            Severity::Low => "LOW".blue(),
+            Severity::Medium => "MEDIUM".yellow(),
+            Severity::High => "HIGH".red(),
+            Severity::Critical => "CRITICAL".red().bold(),
+        }
+    }
 }
 
 impl OutputSink for TerminalWriter {
@@ -187,10 +252,13 @@ impl OutputSink for TerminalWriter {
             }
             TraceEvent::Process(e) => self.format_process_event(&e),
             TraceEvent::Summary(s) => self.format_summary(&s),
+            TraceEvent::FileAccess(e) => self.format_file_access_event(&e),
+            TraceEvent::RuleMatch(e) => self.format_rule_match_event(&e),
+            TraceEvent::AuditFinding(f) => Self::format_audit_finding(&f),
         };
 
         writeln!(self.buffer, "{}", output)?;
-        
+
         // Flush immediately for terminal output
         let stderr = std::io::stderr();
         let mut handle = stderr.lock();

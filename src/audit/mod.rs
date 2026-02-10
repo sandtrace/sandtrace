@@ -15,8 +15,12 @@ pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
     run_audit_with_config(args, &config::load_config())
 }
 
-pub fn run_audit_with_config(args: AuditArgs, config: &SandtraceConfig) -> Result<(), SandtraceError> {
-    args.validate().map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
+pub fn run_audit_with_config(
+    args: AuditArgs,
+    config: &SandtraceConfig,
+) -> Result<(), SandtraceError> {
+    args.validate()
+        .map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
 
     // Load rules
     let mut registry = RuleRegistry::new();
@@ -87,8 +91,14 @@ pub fn run_audit_with_config(args: AuditArgs, config: &SandtraceConfig) -> Resul
         crate::cli::AuditFormat::Sarif => print_sarif_report(&findings)?,
     }
 
-    let critical_count = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-    let high_count = findings.iter().filter(|f| f.severity == Severity::High).count();
+    let critical_count = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let high_count = findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
 
     eprintln!(
         "\nAudit complete: {} findings ({} critical, {} high)",
@@ -121,9 +131,21 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
             }
             !matches!(
                 name.as_ref(),
-                "node_modules" | "target" | "vendor" | ".git" | "__pycache__"
-                    | "dist" | "build" | ".pnpm" | ".venv" | "venv" | ".tox"
-                    | "playwright-report" | "test-results" | "coverage" | ".cache"
+                "node_modules"
+                    | "target"
+                    | "vendor"
+                    | ".git"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+                    | ".pnpm"
+                    | ".venv"
+                    | "venv"
+                    | ".tox"
+                    | "playwright-report"
+                    | "test-results"
+                    | "coverage"
+                    | ".cache"
             )
         })
         .build()
@@ -135,23 +157,57 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn is_scannable(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // Include common source/config file extensions
     matches!(
         ext,
-        "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"
-            | "py" | "rb" | "php" | "go" | "rs" | "java" | "kt" | "swift" | "c" | "cpp" | "h"
-            | "sh" | "bash" | "zsh" | "fish"
-            | "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "cfg" | "conf"
-            | "env" | "env.local" | "env.production"
-            | "md" | "txt" | "csv"
-            | "html" | "css" | "scss" | "sass" | "less"
-            | "sql" | "graphql" | "gql"
-            | "dockerfile" | "makefile" | "gemfile" | "rakefile"
+        "js" | "ts"
+            | "jsx"
+            | "tsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "rb"
+            | "php"
+            | "go"
+            | "rs"
+            | "java"
+            | "kt"
+            | "swift"
+            | "c"
+            | "cpp"
+            | "h"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "xml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "env"
+            | "env.local"
+            | "env.production"
+            | "md"
+            | "txt"
+            | "csv"
+            | "html"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "sql"
+            | "graphql"
+            | "gql"
+            | "dockerfile"
+            | "makefile"
+            | "gemfile"
+            | "rakefile"
     ) || path
         .file_name()
         .and_then(|n| n.to_str())
@@ -219,8 +275,9 @@ fn print_terminal_report(findings: &[AuditFinding]) {
 }
 
 fn print_json_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
-    let json = serde_json::to_string_pretty(findings)
-        .map_err(|e| SandtraceError::InvalidArgument(format!("JSON serialization failed: {}", e)))?;
+    let json = serde_json::to_string_pretty(findings).map_err(|e| {
+        SandtraceError::InvalidArgument(format!("JSON serialization failed: {}", e))
+    })?;
     println!("{}", json);
     Ok(())
 }
@@ -259,9 +316,9 @@ fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
         }]
     });
 
-    let json = serde_json::to_string_pretty(&sarif)
-        .map_err(|e| SandtraceError::InvalidArgument(format!("SARIF serialization failed: {}", e)))?;
+    let json = serde_json::to_string_pretty(&sarif).map_err(|e| {
+        SandtraceError::InvalidArgument(format!("SARIF serialization failed: {}", e))
+    })?;
     println!("{}", json);
     Ok(())
 }
-

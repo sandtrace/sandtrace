@@ -92,16 +92,9 @@ pub fn read_registers(pid: Pid) -> Result<UserRegs> {
 
     // PTRACE_GETREGS on x86_64
     let mut regs: libc::user_regs_struct = unsafe { mem::zeroed() };
-    
+
     // Use ptrace with PTRACE_GETREGS
-    let res = unsafe {
-        libc::ptrace(
-            libc::PTRACE_GETREGS,
-            pid.as_raw(),
-            0,
-            &mut regs as *mut _,
-        )
-    };
+    let res = unsafe { libc::ptrace(libc::PTRACE_GETREGS, pid.as_raw(), 0, &mut regs as *mut _) };
 
     if res < 0 {
         return Err(TracerError::Ptrace(nix::Error::last()).into());

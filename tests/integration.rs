@@ -52,7 +52,10 @@ fn parse_jsonl(stdout: &str) -> Vec<serde_json::Value> {
 }
 
 /// Find events of a specific type in JSONL output
-fn events_of_type<'a>(events: &'a [serde_json::Value], event_type: &str) -> Vec<&'a serde_json::Value> {
+fn events_of_type<'a>(
+    events: &'a [serde_json::Value],
+    event_type: &str,
+) -> Vec<&'a serde_json::Value> {
     events
         .iter()
         .filter(|e| e.get("event_type").and_then(|v| v.as_str()) == Some(event_type))
@@ -60,7 +63,10 @@ fn events_of_type<'a>(events: &'a [serde_json::Value], event_type: &str) -> Vec<
 }
 
 /// Find syscall events with a specific syscall name
-fn syscall_events_named<'a>(events: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_json::Value> {
+fn syscall_events_named<'a>(
+    events: &'a [serde_json::Value],
+    name: &str,
+) -> Vec<&'a serde_json::Value> {
     events
         .iter()
         .filter(|e| {
@@ -73,6 +79,7 @@ fn syscall_events_named<'a>(events: &'a [serde_json::Value], name: &str) -> Vec<
 // ========== Basic Trace Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn trace_bin_true_exits_zero() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0, "expected exit code 0 for /bin/true");
@@ -93,6 +100,7 @@ fn trace_bin_true_exits_zero() {
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn trace_bin_true_has_execve_event() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0);
@@ -103,12 +111,18 @@ fn trace_bin_true_has_execve_event() {
     let process_events = events_of_type(&events, "process");
     let exec_events: Vec<_> = process_events
         .iter()
-        .filter(|e| e.get("kind").and_then(|k| k.get("type")).and_then(|t| t.as_str()) == Some("exec"))
+        .filter(|e| {
+            e.get("kind")
+                .and_then(|k| k.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("exec")
+        })
         .collect();
     assert!(!exec_events.is_empty(), "expected at least one exec event");
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn trace_bin_true_has_exit_event() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0);
@@ -118,8 +132,14 @@ fn trace_bin_true_has_exit_event() {
     let exit_events: Vec<_> = process_events
         .iter()
         .filter(|e| {
-            e.get("kind").and_then(|k| k.get("type")).and_then(|t| t.as_str()) == Some("exit")
-                && e.get("kind").and_then(|k| k.get("code")).and_then(|c| c.as_i64()) == Some(0)
+            e.get("kind")
+                .and_then(|k| k.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("exit")
+                && e.get("kind")
+                    .and_then(|k| k.get("code"))
+                    .and_then(|c| c.as_i64())
+                    == Some(0)
         })
         .collect();
     assert!(!exit_events.is_empty(), "expected exit event with code 0");
@@ -128,11 +148,11 @@ fn trace_bin_true_has_exit_event() {
 // ========== File Access Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn trace_file_read_etc_hostname() {
     // /etc/hostname should be readable in trace-only mode
-    let (code, stdout, _stderr) = run_sandtrace(&[
-        "run", "--trace-only", "/bin/cat", "/etc/hostname",
-    ]);
+    let (code, stdout, _stderr) =
+        run_sandtrace(&["run", "--trace-only", "/bin/cat", "/etc/hostname"]);
     assert_eq!(code, 0);
 
     let events = parse_jsonl(&stdout);
@@ -159,23 +179,31 @@ fn trace_file_read_etc_hostname() {
 // ========== Sandbox Deny Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn sandbox_denies_etc_shadow_read() {
     let fixture = fixture_bin("read_file");
     if !fixture.exists() {
-        panic!("fixture binary not found at {:?} - build fixtures first", fixture);
+        panic!(
+            "fixture binary not found at {:?} - build fixtures first",
+            fixture
+        );
     }
 
     let fdir = fixture_dir();
     let (code, stdout, _stderr) = run_sandtrace(&[
         "run",
-        "--allow-path", &fdir,
+        "--allow-path",
+        &fdir,
         "--allow-exec",
         fixture.to_str().unwrap(),
         "/etc/shadow",
     ]);
 
     // Should have non-zero exit (denied)
-    assert_ne!(code, 0, "expected non-zero exit code when reading /etc/shadow");
+    assert_ne!(
+        code, 0,
+        "expected non-zero exit code when reading /etc/shadow"
+    );
 
     let events = parse_jsonl(&stdout);
     let summary = events_of_type(&events, "summary");
@@ -193,13 +221,11 @@ fn sandbox_denies_etc_shadow_read() {
                 && e.get("action").and_then(|v| v.as_str()) == Some("deny")
         })
         .collect();
-    assert!(
-        !denied_events.is_empty(),
-        "expected denied syscall events"
-    );
+    assert!(!denied_events.is_empty(), "expected denied syscall events");
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn sandbox_allows_usr_read() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "/bin/ls", "/usr"]);
     assert_eq!(code, 0, "expected exit code 0 for /bin/ls /usr");
@@ -213,6 +239,7 @@ fn sandbox_allows_usr_read() {
 // ========== Network Block Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn sandbox_blocks_network_connect() {
     let fixture = fixture_bin("connect_out");
     if !fixture.exists() {
@@ -222,7 +249,8 @@ fn sandbox_blocks_network_connect() {
     let fdir = fixture_dir();
     let (code, stdout, _stderr) = run_sandtrace(&[
         "run",
-        "--allow-path", &fdir,
+        "--allow-path",
+        &fdir,
         "--allow-exec",
         fixture.to_str().unwrap(),
     ]);
@@ -236,6 +264,7 @@ fn sandbox_blocks_network_connect() {
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn sandbox_allows_network_with_flag() {
     let fixture = fixture_bin("connect_out");
     if !fixture.exists() {
@@ -248,7 +277,8 @@ fn sandbox_allows_network_with_flag() {
     let (_code, stdout, _stderr) = run_sandtrace(&[
         "run",
         "--allow-net",
-        "--allow-path", &fdir,
+        "--allow-path",
+        &fdir,
         "--allow-exec",
         fixture.to_str().unwrap(),
     ]);
@@ -261,24 +291,25 @@ fn sandbox_allows_network_with_flag() {
     let connect_events = syscall_events_named(&events, "connect");
     for evt in &connect_events {
         let action = evt.get("action").and_then(|a| a.as_str()).unwrap_or("");
-        assert_ne!(action, "deny", "connect should not be denied with --allow-net");
+        assert_ne!(
+            action, "deny",
+            "connect should not be denied with --allow-net"
+        );
     }
 }
 
 // ========== Fork Follow Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn trace_follows_forks() {
     let fixture = fixture_bin("fork_child");
     if !fixture.exists() {
         panic!("fixture binary not found at {:?}", fixture);
     }
 
-    let (code, stdout, _stderr) = run_sandtrace(&[
-        "run",
-        "--trace-only",
-        fixture.to_str().unwrap(),
-    ]);
+    let (code, stdout, _stderr) =
+        run_sandtrace(&["run", "--trace-only", fixture.to_str().unwrap()]);
     assert_eq!(code, 0, "fork_child should exit 0");
 
     let events = parse_jsonl(&stdout);
@@ -287,7 +318,12 @@ fn trace_follows_forks() {
     let process_events = events_of_type(&events, "process");
     let fork_events: Vec<_> = process_events
         .iter()
-        .filter(|e| e.get("kind").and_then(|k| k.get("type")).and_then(|t| t.as_str()) == Some("fork"))
+        .filter(|e| {
+            e.get("kind")
+                .and_then(|k| k.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("fork")
+        })
         .collect();
     assert!(
         !fork_events.is_empty(),
@@ -307,6 +343,7 @@ fn trace_follows_forks() {
 // ========== Timeout Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn timeout_kills_long_running_process() {
     let fixture = fixture_bin("busy_loop");
     if !fixture.exists() {
@@ -317,7 +354,8 @@ fn timeout_kills_long_running_process() {
     let (_code, stdout, _stderr) = run_sandtrace(&[
         "run",
         "--trace-only",
-        "--timeout", "2",
+        "--timeout",
+        "2",
         fixture.to_str().unwrap(),
     ]);
 
@@ -339,13 +377,20 @@ fn timeout_kills_long_running_process() {
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let has_timeout_note = suspicious.iter().any(|s| s.to_lowercase().contains("timed out") || s.to_lowercase().contains("timeout"));
-    assert!(has_timeout_note, "expected timeout note in suspicious_activity, got: {:?}", suspicious);
+    let has_timeout_note = suspicious
+        .iter()
+        .any(|s| s.to_lowercase().contains("timed out") || s.to_lowercase().contains("timeout"));
+    assert!(
+        has_timeout_note,
+        "expected timeout note in suspicious_activity, got: {:?}",
+        suspicious
+    );
 }
 
 // ========== Seccomp Trap Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn seccomp_traps_mount_syscall() {
     let fixture = fixture_bin("try_mount");
     if !fixture.exists() {
@@ -355,7 +400,8 @@ fn seccomp_traps_mount_syscall() {
     let fdir = fixture_dir();
     let (code, stdout, stderr) = run_sandtrace(&[
         "run",
-        "--allow-path", &fdir,
+        "--allow-path",
+        &fdir,
         "--allow-exec",
         fixture.to_str().unwrap(),
     ]);
@@ -390,6 +436,7 @@ fn seccomp_traps_mount_syscall() {
 // ========== Policy File Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn custom_policy_file_loaded() {
     let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
@@ -416,13 +463,14 @@ fn custom_policy_file_loaded() {
 // ========== Allow-path CLI flag Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn allow_path_flag_permits_access() {
-    let (code, stdout, _stderr) = run_sandtrace(&[
-        "run",
-        "--allow-path", "/tmp",
-        "/bin/ls", "/tmp",
-    ]);
-    assert_eq!(code, 0, "expected /bin/ls /tmp to succeed with --allow-path /tmp");
+    let (code, stdout, _stderr) =
+        run_sandtrace(&["run", "--allow-path", "/tmp", "/bin/ls", "/tmp"]);
+    assert_eq!(
+        code, 0,
+        "expected /bin/ls /tmp to succeed with --allow-path /tmp"
+    );
 
     let events = parse_jsonl(&stdout);
     let summary = events_of_type(&events, "summary");
@@ -433,6 +481,7 @@ fn allow_path_flag_permits_access() {
 // ========== JSONL Output Format Tests ==========
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn jsonl_output_is_valid_json_lines() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0);
@@ -443,16 +492,12 @@ fn jsonl_output_is_valid_json_lines() {
             continue;
         }
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-        assert!(
-            parsed.is_ok(),
-            "line {} is not valid JSON: {}",
-            i + 1,
-            line
-        );
+        assert!(parsed.is_ok(), "line {} is not valid JSON: {}", i + 1, line);
     }
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn every_event_has_event_type() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0);
@@ -469,6 +514,7 @@ fn every_event_has_event_type() {
 }
 
 #[test]
+#[ignore] // Requires Linux namespaces + ptrace (not available in WSL2/CI)
 fn syscall_events_have_required_fields() {
     let (code, stdout, _stderr) = run_sandtrace(&["run", "--trace-only", "/bin/true"]);
     assert_eq!(code, 0);

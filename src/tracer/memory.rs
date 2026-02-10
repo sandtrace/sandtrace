@@ -30,22 +30,14 @@ fn read_memory_process_vm(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
         iov_len: len,
     };
 
-    let res = unsafe {
-        libc::process_vm_readv(
-            pid.as_raw(),
-            &local_iov,
-            1,
-            &remote_iov,
-            1,
-            0,
-        )
-    };
+    let res = unsafe { libc::process_vm_readv(pid.as_raw(), &local_iov, 1, &remote_iov, 1, 0) };
 
     if res < 0 {
         return Err(TracerError::MemoryRead {
             addr,
             source: Box::new(std::io::Error::last_os_error()),
-        }.into());
+        }
+        .into());
     }
 
     buf.truncate(res as usize);
@@ -71,7 +63,8 @@ fn read_memory_ptrace(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
                     return Err(TracerError::MemoryRead {
                         addr,
                         source: Box::new(std::io::Error::from(e)),
-                    }.into());
+                    }
+                    .into());
                 }
                 break;
             }
@@ -92,11 +85,13 @@ pub fn read_string(pid: Pid, addr: u64, max_len: usize) -> Result<String> {
                 let bytes = word.to_le_bytes();
                 for byte in &bytes {
                     if *byte == 0 {
-                        return String::from_utf8(result)
-                            .map_err(|e| TracerError::MemoryRead {
+                        return String::from_utf8(result).map_err(|e| {
+                            TracerError::MemoryRead {
                                 addr,
                                 source: Box::new(e),
-                            }.into());
+                            }
+                            .into()
+                        });
                     }
                     result.push(*byte);
                 }
@@ -106,16 +101,20 @@ pub fn read_string(pid: Pid, addr: u64, max_len: usize) -> Result<String> {
                 return Err(TracerError::MemoryRead {
                     addr,
                     source: Box::new(std::io::Error::from(e)),
-                }.into());
+                }
+                .into());
             }
         }
     }
 
     // Truncated string
-    String::from_utf8(result).map_err(|e| TracerError::MemoryRead {
-        addr,
-        source: Box::new(e),
-    }.into())
+    String::from_utf8(result).map_err(|e| {
+        TracerError::MemoryRead {
+            addr,
+            source: Box::new(e),
+        }
+        .into()
+    })
 }
 
 /// Read a struct from tracee memory
@@ -130,7 +129,8 @@ pub fn read_struct<T: Sized>(pid: Pid, addr: u64) -> Result<T> {
                 std::io::ErrorKind::UnexpectedEof,
                 "Incomplete struct read",
             )),
-        }.into());
+        }
+        .into());
     }
 
     unsafe {

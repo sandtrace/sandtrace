@@ -6,8 +6,8 @@
 //! **Privacy guarantee:** Never collects file contents, credential values,
 //! full file paths, or user data. Only anonymized metadata.
 
-use chrono::{DateTime, Utc};
 use crate::event::Severity;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

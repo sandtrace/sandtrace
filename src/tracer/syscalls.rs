@@ -27,20 +27,20 @@ pub fn categorize_syscall(name: &str) -> SyscallCategory {
         | "access" | "faccessat" => SyscallCategory::FileRead,
 
         // Metadata operations
-        "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "lchown" | "fchownat"
-        | "utime" | "utimes" | "futimesat" | "utimensat" | "futimens" | "statfs"
-        | "fstatfs" => SyscallCategory::FileMetadata,
+        "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "lchown" | "fchownat" | "utime"
+        | "utimes" | "futimesat" | "utimensat" | "futimens" | "statfs" | "fstatfs" => {
+            SyscallCategory::FileMetadata
+        }
 
         // Directory operations
         "mkdir" | "mkdirat" | "rmdir" | "getdents" | "getdents64" | "chdir" | "fchdir"
         | "getcwd" => SyscallCategory::Directory,
 
         // Process operations
-        "fork" | "vfork" | "clone" | "clone3" | "execve" | "execveat" | "exit"
-        | "exit_group" | "wait4" | "waitid" | "waitpid" | "setuid" | "setgid"
-        | "seteuid" | "setegid" | "setreuid" | "setregid" | "setgroups"
-        | "setresuid" | "setresgid" | "setpgid" | "setsid" | "setrlimit"
-        | "prlimit64" | "capset" | "capget" => SyscallCategory::Process,
+        "fork" | "vfork" | "clone" | "clone3" | "execve" | "execveat" | "exit" | "exit_group"
+        | "wait4" | "waitid" | "waitpid" | "setuid" | "setgid" | "seteuid" | "setegid"
+        | "setreuid" | "setregid" | "setgroups" | "setresuid" | "setresgid" | "setpgid"
+        | "setsid" | "setrlimit" | "prlimit64" | "capset" | "capget" => SyscallCategory::Process,
 
         // Network operations
         "socket" | "socketpair" | "connect" | "accept" | "accept4" | "bind" | "listen"
@@ -49,9 +49,10 @@ pub fn categorize_syscall(name: &str) -> SyscallCategory {
         }
 
         // Memory operations
-        "mmap" | "munmap" | "mprotect" | "madvise" | "msync" | "mlock" | "munlock"
-        | "mlockall" | "munlockall" | "mincore" | "remap_file_pages" | "mremap"
-        | "brk" | "sbrk" => SyscallCategory::Memory,
+        "mmap" | "munmap" | "mprotect" | "madvise" | "msync" | "mlock" | "munlock" | "mlockall"
+        | "munlockall" | "mincore" | "remap_file_pages" | "mremap" | "brk" | "sbrk" => {
+            SyscallCategory::Memory
+        }
 
         // Signal operations
         "kill" | "tkill" | "tgkill" | "sigaction" | "sigreturn" | "rt_sigreturn"
@@ -60,21 +61,23 @@ pub fn categorize_syscall(name: &str) -> SyscallCategory {
         | "sigprocmask" | "sigsuspend" | "sigaltstack" => SyscallCategory::Signal,
 
         // IPC operations
-        "pipe" | "pipe2" | "dup" | "dup2" | "dup3" | "select" | "pselect6" | "poll"
-        | "ppoll" | "epoll_create" | "epoll_create1" | "epoll_ctl" | "epoll_wait"
-        | "epoll_pwait" | "eventfd" | "eventfd2" | "signalfd" | "signalfd4"
-        | "timerfd_create" | "timerfd_settime" | "timerfd_gettime" | "inotify_init"
-        | "inotify_init1" | "inotify_add_watch" | "inotify_rm_watch" | "fanotify_init"
-        | "fanotify_mark" => SyscallCategory::Ipc,
+        "pipe" | "pipe2" | "dup" | "dup2" | "dup3" | "select" | "pselect6" | "poll" | "ppoll"
+        | "epoll_create" | "epoll_create1" | "epoll_ctl" | "epoll_wait" | "epoll_pwait"
+        | "eventfd" | "eventfd2" | "signalfd" | "signalfd4" | "timerfd_create"
+        | "timerfd_settime" | "timerfd_gettime" | "inotify_init" | "inotify_init1"
+        | "inotify_add_watch" | "inotify_rm_watch" | "fanotify_init" | "fanotify_mark" => {
+            SyscallCategory::Ipc
+        }
 
         // System operations (usually dangerous)
         "reboot" | "kexec_load" | "kexec_file_load" | "init_module" | "finit_module"
-        | "delete_module" | "acct" | "pivot_root" | "mount" | "umount2" | "swapon"
-        | "swapoff" | "sethostname" | "setdomainname" | "iopl" | "ioperm" | "vm86"
-        | "vm86old" | "create_module" | "get_kernel_syms" | "query_module"
-        | "nfsservctl" | "getpmsg" | "putpmsg" | "afs_syscall" | "tuxcall"
-        | "security" | "perf_event_open" | "bpf" | "userfaultfd" | "membarrier"
-        | "pkey_alloc" | "pkey_free" | "pkey_mprotect" => SyscallCategory::System,
+        | "delete_module" | "acct" | "pivot_root" | "mount" | "umount2" | "swapon" | "swapoff"
+        | "sethostname" | "setdomainname" | "iopl" | "ioperm" | "vm86" | "vm86old"
+        | "create_module" | "get_kernel_syms" | "query_module" | "nfsservctl" | "getpmsg"
+        | "putpmsg" | "afs_syscall" | "tuxcall" | "security" | "perf_event_open" | "bpf"
+        | "userfaultfd" | "membarrier" | "pkey_alloc" | "pkey_free" | "pkey_mprotect" => {
+            SyscallCategory::System
+        }
 
         // Other syscalls
         _ => SyscallCategory::Other,

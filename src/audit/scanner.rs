@@ -1,6 +1,6 @@
-use crate::config::SandtraceConfig;
 #[cfg(test)]
 use crate::config::CustomPattern;
+use crate::config::SandtraceConfig;
 use crate::event::{AuditFinding, Severity};
 use regex::Regex;
 use std::path::Path;
@@ -9,27 +9,70 @@ use std::path::Path;
 /// Checked against the line text (excluding the matched token itself).
 const REDACTION_MARKERS: &[&str] = &[
     // Explicit redaction
-    "_redacted", "-redacted", "redacted_", "redacted-",
+    "_redacted",
+    "-redacted",
+    "redacted_",
+    "redacted-",
     // Documentation placeholders
-    "placeholder", "your_token", "your-token",
-    "your_key", "your-key", "your_secret", "your-secret",
-    "your_password", "your-password",
-    "changeme", "replace_me", "replace-me",
-    "sample_token", "sample-token", "sample_key", "sample-key",
-    "dummy_token", "dummy-token", "fake_token", "fake-token",
+    "placeholder",
+    "your_token",
+    "your-token",
+    "your_key",
+    "your-key",
+    "your_secret",
+    "your-secret",
+    "your_password",
+    "your-password",
+    "changeme",
+    "replace_me",
+    "replace-me",
+    "sample_token",
+    "sample-token",
+    "sample_key",
+    "sample-key",
+    "dummy_token",
+    "dummy-token",
+    "fake_token",
+    "fake-token",
     // Placeholder/dummy values
-    "your-api", "your_api", "your_access", "your-access",
-    "your_bearer", "your-bearer", "key-xxxx", "xxxx",
+    "your-api",
+    "your_api",
+    "your_access",
+    "your-access",
+    "your_bearer",
+    "your-bearer",
+    "key-xxxx",
+    "xxxx",
     // Template variables (Helm, Jinja, env substitution)
-    "{{ .", "{{.", "{{ $", "{{$", "${", "$(", "<%=",
+    "{{ .",
+    "{{.",
+    "{{ $",
+    "{{$",
+    "${",
+    "$(",
+    "<%=",
     // Dynamic value lookups (not hardcoded)
-    "config(", "env(", "getenv(", "process.env",
-    "os.environ", "vault.", "ssm.", "secrets.",
+    "config(",
+    "env(",
+    "getenv(",
+    "process.env",
+    "os.environ",
+    "vault.",
+    "ssm.",
+    "secrets.",
     // Logging/debugging (showing truncated values, not hardcoding)
-    "log::", "logger.", "console.log", "this->error(", "this->info(",
-    "str::take(", "substr(",
+    "log::",
+    "logger.",
+    "console.log",
+    "this->error(",
+    "this->info(",
+    "str::take(",
+    "substr(",
     // String concatenation (dynamic values, not hardcoded)
-    "'.$", "\".$", "' .", "\" .",
+    "'.$",
+    "\".$",
+    "' .",
+    "\" .",
 ];
 
 struct ContentPattern {
@@ -101,7 +144,10 @@ pub fn scan_file_content(
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     // Skip files that are obviously test fixtures or examples
-    if file_path_str.contains("/test") || file_path_str.contains("/fixture") || file_path_str.contains("/example") {
+    if file_path_str.contains("/test")
+        || file_path_str.contains("/fixture")
+        || file_path_str.contains("/example")
+    {
         return Ok(findings);
     }
 
@@ -144,7 +190,8 @@ pub fn scan_file_content(
 
             // Skip matches where the matched content or surrounding lines contain redaction markers.
             // Check the line at the match position and adjacent lines to handle off-by-one.
-            let check_lines: Vec<&str> = content.lines()
+            let check_lines: Vec<&str> = content
+                .lines()
                 .skip(line_number.saturating_sub(2))
                 .take(3)
                 .collect();
@@ -157,7 +204,9 @@ pub fn scan_file_content(
             if line_number > 1 {
                 if let Some(prev_line) = content.lines().nth(line_number.saturating_sub(2)) {
                     let prev_lower = prev_line.to_lowercase();
-                    if prev_lower.contains("@sandtrace-ignore") || prev_lower.contains("sandtrace:ignore") {
+                    if prev_lower.contains("@sandtrace-ignore")
+                        || prev_lower.contains("sandtrace:ignore")
+                    {
                         continue;
                     }
                 }
@@ -246,8 +295,8 @@ fn check_package_json_scripts(dir: &Path) -> Vec<AuditFinding> {
             if let Some(script) = scripts.get(*hook).and_then(|v| v.as_str()) {
                 // Flag scripts that download/execute external content
                 let suspicious_patterns = [
-                    "curl ", "wget ", "eval(", "node -e", "base64",
-                    "http://", "https://", "|sh", "| sh", "|bash", "| bash",
+                    "curl ", "wget ", "eval(", "node -e", "base64", "http://", "https://", "|sh",
+                    "| sh", "|bash", "| bash",
                 ];
 
                 for pattern in &suspicious_patterns {
@@ -312,7 +361,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("app.rs");
         let mut file = std::fs::File::create(&file_path).unwrap();
-        writeln!(file, "let key = \"INTERNAL_ABCDEF0123456789ABCDEF0123456789\";").unwrap();
+        writeln!(
+            file,
+            "let key = \"INTERNAL_ABCDEF0123456789ABCDEF0123456789\";"
+        )
+        .unwrap();
 
         let mut config = test_config();
         config.custom_patterns.push(CustomPattern {
@@ -332,10 +385,16 @@ mod tests {
         let file_path = dir.path().join("config.js");
         let mut file = std::fs::File::create(&file_path).unwrap();
         // This line has a real-looking AWS key but also a custom redaction marker
-        writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE'; // test_fixture_value").unwrap();
+        writeln!(
+            file,
+            "const key = 'AKIAIOSFODNN7EXAMPLE'; // test_fixture_value"
+        )
+        .unwrap();
 
         let mut config = test_config();
-        config.redaction_markers.push("test_fixture_value".to_string());
+        config
+            .redaction_markers
+            .push("test_fixture_value".to_string());
 
         let findings = scan_file_content(&file_path, &config).unwrap();
         assert!(findings.is_empty());

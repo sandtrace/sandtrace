@@ -18,8 +18,12 @@ pub async fn run_watch(args: WatchArgs) -> Result<(), SandtraceError> {
     run_watch_with_config(args, &config).await
 }
 
-pub async fn run_watch_with_config(args: WatchArgs, config: &SandtraceConfig) -> Result<(), SandtraceError> {
-    args.validate().map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
+pub async fn run_watch_with_config(
+    args: WatchArgs,
+    config: &SandtraceConfig,
+) -> Result<(), SandtraceError> {
+    args.validate()
+        .map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
 
     // Load rules
     let mut registry = RuleRegistry::new();
@@ -159,10 +163,22 @@ fn is_credential_dir(dir: &std::path::Path) -> bool {
     let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     matches!(
         name,
-        ".aws" | ".ssh" | ".gnupg" | ".docker" | ".kube" | ".azure"
-            | ".config" | ".pip" | ".npm" | ".cargo" | ".composer"
-            | ".pgpass" | ".triton" | ".volta" | ".local"
-            | "gcloud" | "npm"
+        ".aws"
+            | ".ssh"
+            | ".gnupg"
+            | ".docker"
+            | ".kube"
+            | ".azure"
+            | ".config"
+            | ".pip"
+            | ".npm"
+            | ".cargo"
+            | ".composer"
+            | ".pgpass"
+            | ".triton"
+            | ".volta"
+            | ".local"
+            | "gcloud"
+            | "npm"
     )
 }
-

@@ -1,6 +1,6 @@
 use crate::cli::RunArgs;
 use crate::error::{Result, SandboxError};
-use crate::policy::{Policy};
+use crate::policy::Policy;
 
 pub mod capabilities;
 pub mod landlock;

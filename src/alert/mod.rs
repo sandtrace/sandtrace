@@ -49,7 +49,11 @@ impl AlertRouter {
     pub async fn dispatch(&self, event: &RuleMatchEvent) -> Result<(), SandtraceError> {
         for dispatcher in &self.dispatchers {
             if let Err(e) = dispatcher.dispatch(event).await {
-                log::error!("Alert dispatch failed for {:?}: {}", dispatcher.channel(), e);
+                log::error!(
+                    "Alert dispatch failed for {:?}: {}",
+                    dispatcher.channel(),
+                    e
+                );
             }
         }
         Ok(())
@@ -63,7 +67,11 @@ impl AlertRouter {
         for dispatcher in &self.dispatchers {
             if channels.contains(&dispatcher.channel()) {
                 if let Err(e) = dispatcher.dispatch(event).await {
-                    log::error!("Alert dispatch failed for {:?}: {}", dispatcher.channel(), e);
+                    log::error!(
+                        "Alert dispatch failed for {:?}: {}",
+                        dispatcher.channel(),
+                        e
+                    );
                 }
             }
         }

@@ -2,8 +2,8 @@ use crate::error::{Result, TracerError};
 use crate::event::SyscallCategory;
 use nix::unistd::Pid;
 
-pub mod x86_64;
 pub mod aarch64;
+pub mod x86_64;
 
 pub trait Architecture: Send + Sync {
     fn name(&self) -> &'static str;

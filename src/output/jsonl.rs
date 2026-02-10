@@ -15,10 +15,8 @@ impl<W: Write + Send> JsonlWriter<W> {
 
 impl<W: Write + Send> OutputSink for JsonlWriter<W> {
     fn emit_event(&mut self, event: TraceEvent) -> Result<()> {
-        let json = serde_json::to_string(&event)
-            .map_err(OutputError::Serialize)?;
-        writeln!(self.writer, "{}", json)
-            .map_err(|e| OutputError::Io(e).into())
+        let json = serde_json::to_string(&event).map_err(OutputError::Serialize)?;
+        writeln!(self.writer, "{}", json).map_err(|e| OutputError::Io(e).into())
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -29,7 +27,7 @@ impl<W: Write + Send> OutputSink for JsonlWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{SyscallCategory, PolicyAction, SyscallArgs};
+    use crate::event::{PolicyAction, SyscallArgs, SyscallCategory};
     use chrono::Utc;
 
     #[test]

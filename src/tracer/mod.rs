@@ -1,6 +1,8 @@
 use crate::cli::RunArgs;
 use crate::error::{Result, TracerError};
-use crate::event::{PolicyAction, ProcessEvent, SyscallEvent, SyscallArgs, TraceEvent, TraceSummary};
+use crate::event::{
+    PolicyAction, ProcessEvent, SyscallArgs, SyscallEvent, TraceEvent, TraceSummary,
+};
 use crate::output::OutputManager;
 use crate::policy::Policy;
 use crate::sandbox::{apply_child_sandbox, SandboxConfig};
@@ -49,11 +51,7 @@ struct TraceStats {
 }
 
 impl Tracer {
-    pub fn new(
-        args: &RunArgs,
-        output: OutputManager,
-        shutdown: Arc<AtomicBool>,
-    ) -> Result<Self> {
+    pub fn new(args: &RunArgs, output: OutputManager, shutdown: Arc<AtomicBool>) -> Result<Self> {
         let config = SandboxConfig::from_args(args)?;
         let architecture = arch::detect_architecture()?;
 
@@ -95,7 +93,10 @@ impl Tracer {
 
         // Execute the command
         let cmd = &self.config.command[0];
-        let args: Vec<&str> = self.config.command[1..].iter().map(|s| s.as_str()).collect();
+        let args: Vec<&str> = self.config.command[1..]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
 
         let err = Command::new(cmd).args(&args).exec();
         eprintln!("Failed to execute {}: {}", cmd, err);
@@ -104,8 +105,7 @@ impl Tracer {
 
     fn run_tracer(&mut self, child: Pid) -> Result<i32> {
         // Wait for child to stop (SIGSTOP from traceme)
-        let status = waitpid(child, None)
-            .map_err(TracerError::Wait)?;
+        let status = waitpid(child, None).map_err(TracerError::Wait)?;
 
         match status {
             WaitStatus::Stopped(_, Signal::SIGSTOP) => {
@@ -203,7 +203,9 @@ impl Tracer {
     }
 
     fn handle_syscall(&mut self, pid: Pid) -> Result<()> {
-        let state = self.process_states.get_mut(&pid)
+        let state = self
+            .process_states
+            .get_mut(&pid)
             .ok_or_else(|| TracerError::ProcessNotFound(pid.as_raw()))?;
 
         match state.syscall_phase {
@@ -213,7 +215,9 @@ impl Tracer {
                 let syscall_nr = self.architecture.syscall_number(&regs);
                 let args = self.architecture.syscall_args(&regs);
 
-                let syscall_name = self.architecture.syscall_name(syscall_nr)
+                let syscall_name = self
+                    .architecture
+                    .syscall_name(syscall_nr)
                     .unwrap_or("unknown")
                     .to_string();
 
@@ -225,7 +229,9 @@ impl Tracer {
                 };
 
                 // Now update state
-                let state = self.process_states.get_mut(&pid)
+                let state = self
+                    .process_states
+                    .get_mut(&pid)
                     .ok_or_else(|| TracerError::ProcessNotFound(pid.as_raw()))?;
 
                 state.current_syscall = Some(state::SyscallInfo {
@@ -240,7 +246,8 @@ impl Tracer {
                 // If denying, modify registers to cause ENOSYS
                 if action == PolicyAction::Deny {
                     let mut modified_regs = regs.clone();
-                    self.architecture.set_syscall_number(&mut modified_regs, u64::MAX);
+                    self.architecture
+                        .set_syscall_number(&mut modified_regs, u64::MAX);
                     arch::write_registers(pid, &modified_regs)?;
                     self.stats.denied_count += 1;
                 }
@@ -294,7 +301,13 @@ impl Tracer {
         Ok(())
     }
 
-    fn evaluate_syscall_policy(&self, pid: Pid, syscall_nr: u64, name: &str, args: &[u64; 6]) -> PolicyAction {
+    fn evaluate_syscall_policy(
+        &self,
+        pid: Pid,
+        syscall_nr: u64,
+        name: &str,
+        args: &[u64; 6],
+    ) -> PolicyAction {
         // Check policy for this syscall
         self.config.policy.get_syscall_action(name)
     }
@@ -345,7 +358,8 @@ impl Tracer {
                 let new_pid = getevent(pid).map_err(TracerError::Ptrace)?;
                 let child_pid = Pid::from_raw(new_pid as i32);
 
-                self.process_states.insert(child_pid, ProcessState::new(child_pid));
+                self.process_states
+                    .insert(child_pid, ProcessState::new(child_pid));
                 self.stats.process_count += 1;
 
                 let proc_event = ProcessEvent::Spawned {

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "sandtrace")]
-#[command(about = "A Rust-based security tool: malware sandbox, credential watcher, and codebase auditor")]
+#[command(
+    about = "A Rust-based security tool: malware sandbox, credential watcher, and codebase auditor"
+)]
 #[command(version = "0.2.0")]
 pub struct Cli {
     #[command(subcommand)]

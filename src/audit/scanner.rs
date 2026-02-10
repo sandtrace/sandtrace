@@ -13,6 +13,8 @@ const REDACTION_MARKERS: &[&str] = &[
     "-redacted",
     "redacted_",
     "redacted-",
+    // Example / documentation keys (e.g. AWS AKIAIOSFODNN7EXAMPLE)
+    "example",
     // Documentation placeholders
     "placeholder",
     "your_token",
@@ -336,11 +338,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("config.js");
         let mut file = std::fs::File::create(&file_path).unwrap();
-        writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE';").unwrap();
+        writeln!(file, "const key = 'AKIAI44QH8DHBG5BREAL';").unwrap();
 
         let findings = scan_file_content(&file_path, &test_config()).unwrap();
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "cred-aws-key");
+    }
+
+    #[test]
+    fn test_skip_aws_example_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("config.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE';").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(findings.is_empty(), "EXAMPLE keys should be skipped by redaction markers");
     }
 
     #[test]
@@ -387,7 +400,7 @@ mod tests {
         // This line has a real-looking AWS key but also a custom redaction marker
         writeln!(
             file,
-            "const key = 'AKIAIOSFODNN7EXAMPLE'; // test_fixture_value"
+            "const key = 'AKIAI44QH8DHBG5BREAL'; // test_fixture_value"
         )
         .unwrap();
 

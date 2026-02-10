@@ -1,0 +1,12 @@
+[book]
+authors = ["Closed Circuit Consulting"]
+language = "en"
+src = "src"
+title = "SandTrace Documentation"
+description = "Documentation for sandtrace — a Rust security tool for malware sandboxing, credential monitoring, codebase auditing, and obfuscation scanning."
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/cc-consulting-nv/sandtrace"
+edit-url-template = "https://github.com/cc-consulting-nv/sandtrace/edit/main/docs/{path}"

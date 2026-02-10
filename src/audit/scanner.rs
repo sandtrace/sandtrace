@@ -2,6 +2,33 @@ use crate::event::{AuditFinding, Severity};
 use regex::Regex;
 use std::path::Path;
 
+/// Lines containing these markers are documentation samples, not real secrets.
+/// Checked against the line text (excluding the matched token itself).
+const REDACTION_MARKERS: &[&str] = &[
+    // Explicit redaction
+    "_redacted", "-redacted", "redacted_", "redacted-",
+    // Documentation placeholders
+    "placeholder", "your_token", "your-token",
+    "your_key", "your-key", "your_secret", "your-secret",
+    "your_password", "your-password",
+    "changeme", "replace_me", "replace-me",
+    "sample_token", "sample-token", "sample_key", "sample-key",
+    "dummy_token", "dummy-token", "fake_token", "fake-token",
+    // Placeholder/dummy values
+    "your-api", "your_api", "your_access", "your-access",
+    "your_bearer", "your-bearer", "key-xxxx", "xxxx",
+    // Template variables (Helm, Jinja, env substitution)
+    "{{ .", "{{.", "{{ $", "{{$", "${", "$(", "<%=",
+    // Dynamic value lookups (not hardcoded)
+    "config(", "env(", "getenv(", "process.env",
+    "os.environ", "vault.", "ssm.", "secrets.",
+    // Logging/debugging (showing truncated values, not hardcoding)
+    "log::", "logger.", "console.log", "this->error(", "this->info(",
+    "str::take(", "substr(",
+    // String concatenation (dynamic values, not hardcoded)
+    "'.$", "\".$", "' .", "\" .",
+];
+
 struct ContentPattern {
     rule_id: &'static str,
     description: &'static str,
@@ -65,8 +92,15 @@ pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Erro
     let file_path_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
 
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
     // Skip files that are obviously test fixtures or examples
     if file_path_str.contains("/test") || file_path_str.contains("/fixture") || file_path_str.contains("/example") {
+        return Ok(findings);
+    }
+
+    // Skip config files that legitimately contain credentials
+    if matches!(file_name, ".env" | ".env.local" | ".claude.json") {
         return Ok(findings);
     }
 
@@ -77,7 +111,28 @@ pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Erro
         };
 
         for mat in regex.find_iter(&content) {
-            let line_number = content[..mat.start()].lines().count() + 1;
+            let line_number = content[..mat.start()].lines().count();
+
+            // Skip matches where the matched content or surrounding lines contain redaction markers.
+            // Check the line at the match position and adjacent lines to handle off-by-one.
+            let check_lines: Vec<&str> = content.lines()
+                .skip(line_number.saturating_sub(2))
+                .take(3)
+                .collect();
+            let context_text = check_lines.join(" ").to_lowercase();
+            if REDACTION_MARKERS.iter().any(|m| context_text.contains(m)) {
+                continue;
+            }
+
+            // Inline suppression: line above contains @sandtrace-ignore or sandtrace:ignore
+            if line_number > 1 {
+                if let Some(prev_line) = content.lines().nth(line_number.saturating_sub(2)) {
+                    let prev_lower = prev_line.to_lowercase();
+                    if prev_lower.contains("@sandtrace-ignore") || prev_lower.contains("sandtrace:ignore") {
+                        continue;
+                    }
+                }
+            }
 
             // Get context lines
             let lines: Vec<&str> = content.lines().collect();

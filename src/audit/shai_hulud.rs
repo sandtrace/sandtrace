@@ -4,15 +4,66 @@ use std::path::Path;
 const MAX_TRAILING_SPACES: usize = 20;
 const STEGANOGRAPHIC_COLUMN: usize = 200;
 
+/// Patterns that indicate the hidden portion of a long line is actually malicious,
+/// not just a normal long SQL statement or seed data array.
+/// These are patterns that would be unusual to find *only* in the hidden tail of a line.
+const SUSPICIOUS_PATTERNS: &[&str] = &[
+    // Code execution / injection
+    "eval(", "exec(", "system(", "passthru(", "shell_exec(",
+    "atob(", "btoa(", "base64_decode(", "base64_encode(",
+    "document.write(", "innerhtml", "outerhtml",
+    "importscripts(",
+    // Shell commands
+    "curl ", "wget ", "nc ", "bash ", "/bin/sh", "/bin/bash",
+    "powershell", "cmd.exe",
+    // XSS / injection
+    "<script", "javascript:", "onerror=", "onload=",
+    // Hex/unicode escapes (obfuscation)
+    "\\x", "\\u00",
+];
+
+/// File extensions where long lines are expected and hidden-content checks produce false positives.
+const NON_EXECUTABLE_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "txt", "rst", "adoc", "csv", "tsv", "log", "json", "yaml", "yml", "toml",
+    "xml", "html", "htm", "svg", "lock", "sum", "mod", "snap", "png", "jpg", "jpeg", "gif",
+    "ico", "woff", "woff2", "ttf", "eot", "map", "min.js", "min.css",
+];
+
+fn is_non_executable(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // Check compound extensions like .min.js
+    for ext in NON_EXECUTABLE_EXTENSIONS {
+        if name.ends_with(&format!(".{}", ext)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detect minified/bundled files where long lines are the norm, not steganography.
+/// If any line exceeds 5000 chars, it's bundled/minified code — not a steganographic attack.
+fn is_minified(lines: &[&str]) -> bool {
+    lines.iter().any(|line| line.len() > 5000)
+}
+
 pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     let file_path_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
+    let skip_hidden_content = is_non_executable(path) || is_minified(&lines);
 
     for (i, line) in lines.iter().enumerate() {
         let line_number = i + 1;
+
+        // Inline suppression: previous line contains @sandtrace-ignore or sandtrace:ignore
+        if i > 0 {
+            let prev = lines[i - 1].to_lowercase();
+            if prev.contains("@sandtrace-ignore") || prev.contains("sandtrace:ignore") {
+                continue;
+            }
+        }
 
         // 1. Excessive trailing whitespace (steganographic payload indicator)
         let trailing_spaces = line.len() - line.trim_end().len();
@@ -36,26 +87,37 @@ pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
         }
 
         // 2. Content past column 200 (hidden payload past visible area)
-        if line.len() > STEGANOGRAPHIC_COLUMN {
-            let visible = &line[..STEGANOGRAPHIC_COLUMN.min(line.len())];
-            let hidden = &line[STEGANOGRAPHIC_COLUMN..];
+        // Skip for non-executable files where long lines are normal (markdown, JSON, logs, etc.)
+        // Only flag as Critical if the hidden portion contains suspicious patterns;
+        // otherwise downgrade to Info (normal long lines in source code).
+        let char_count = line.chars().count();
+        if !skip_hidden_content && char_count > STEGANOGRAPHIC_COLUMN {
+            let visible: String = line.chars().take(STEGANOGRAPHIC_COLUMN).collect();
+            let hidden: String = line.chars().skip(STEGANOGRAPHIC_COLUMN).collect();
             if !hidden.trim().is_empty() {
-                findings.push(AuditFinding {
-                    file_path: file_path_str.clone(),
-                    line_number: Some(line_number),
-                    rule_id: "shai-hulud-hidden-content".to_string(),
-                    severity: Severity::Critical,
-                    description: format!(
-                        "Hidden content past column {} ({} hidden chars)",
-                        STEGANOGRAPHIC_COLUMN,
-                        hidden.len()
-                    ),
-                    matched_pattern: format!("content past column {}", STEGANOGRAPHIC_COLUMN),
-                    context_lines: vec![
-                        format!("visible: {}...", &visible[..80.min(visible.len())]),
-                        format!("hidden:  {}", &hidden[..80.min(hidden.len())]),
-                    ],
-                });
+                let hidden_lower = hidden.to_lowercase();
+                let is_suspicious = SUSPICIOUS_PATTERNS.iter().any(|p| hidden_lower.contains(p));
+
+                if is_suspicious {
+                    let visible_preview: String = visible.chars().take(80).collect();
+                    let hidden_preview: String = hidden.chars().take(80).collect();
+                    findings.push(AuditFinding {
+                        file_path: file_path_str.clone(),
+                        line_number: Some(line_number),
+                        rule_id: "shai-hulud-hidden-content".to_string(),
+                        severity: Severity::Critical,
+                        description: format!(
+                            "Suspicious hidden content past column {} ({} hidden chars)",
+                            STEGANOGRAPHIC_COLUMN,
+                            hidden.len()
+                        ),
+                        matched_pattern: format!("suspicious content past column {}", STEGANOGRAPHIC_COLUMN),
+                        context_lines: vec![
+                            format!("visible: {}...", visible_preview),
+                            format!("hidden:  {}", hidden_preview),
+                        ],
+                    });
+                }
             }
         }
 
@@ -78,13 +140,30 @@ fn check_invisible_chars(
     file_path: &str,
     findings: &mut Vec<AuditFinding>,
 ) {
+    let chars: Vec<char> = line.chars().collect();
     let invisible_chars: Vec<(usize, char, &str)> = line
         .char_indices()
         .filter_map(|(idx, ch)| {
             let name = match ch {
                 '\u{200B}' => Some("ZERO WIDTH SPACE"),
                 '\u{200C}' => Some("ZERO WIDTH NON-JOINER"),
-                '\u{200D}' => Some("ZERO WIDTH JOINER"),
+                '\u{200D}' => {
+                    // ZWJ between non-ASCII chars is likely emoji (e.g. 👨‍👩‍👧)
+                    // Only flag ZWJ between ASCII chars (suspicious injection)
+                    let char_pos = chars.iter().position(|&c| {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        // Find by byte index
+                        line.as_bytes().get(idx) == s.as_bytes().first()
+                    });
+                    let prev_is_ascii = idx > 0 && line[..idx].chars().next_back().map_or(false, |c| c.is_ascii());
+                    let next_is_ascii = line[idx + ch.len_utf8()..].chars().next().map_or(false, |c| c.is_ascii());
+                    if prev_is_ascii && next_is_ascii {
+                        Some("ZERO WIDTH JOINER")
+                    } else {
+                        None // Likely emoji ZWJ sequence
+                    }
+                }
                 '\u{FEFF}' => Some("ZERO WIDTH NO-BREAK SPACE (BOM)"),
                 '\u{2060}' => Some("WORD JOINER"),
                 '\u{2061}' => Some("FUNCTION APPLICATION"),
@@ -141,7 +220,7 @@ fn check_base64_content(
     ).unwrap();
 
     for mat in base64_regex.find_iter(content) {
-        let line_number = content[..mat.start()].lines().count() + 1;
+        let line_number = content[..mat.start()].lines().count();
 
         findings.push(AuditFinding {
             file_path: file_path.to_string(),

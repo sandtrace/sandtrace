@@ -113,6 +113,7 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
         if matches!(
             name_str.as_ref(),
             "node_modules" | "target" | "vendor" | ".git" | "__pycache__" | "dist" | "build"
+                | "playwright-report" | "test-results" | "coverage"
         ) {
             continue;
         }

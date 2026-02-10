@@ -1,0 +1,20 @@
+# Summary
+
+[Introduction](./introduction.md)
+
+- [Getting Started](./getting-started.md)
+- [Commands]()
+    - [audit](./commands/audit.md)
+    - [scan](./commands/scan.md)
+    - [watch](./commands/watch.md)
+    - [run](./commands/run.md)
+    - [init](./commands/init.md)
+- [Configuration](./configuration.md)
+- [Rules]()
+    - [Audit Detection Rules](./rules/detection-rules.md)
+    - [Watch Rules](./rules/watch-rules.md)
+    - [Custom Rules](./rules/custom-rules.md)
+- [Policies](./policies.md)
+- [CI/CD Integration](./ci-cd.md)
+- [Architecture](./architecture.md)
+- [Security](./security.md)

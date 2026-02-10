@@ -77,6 +77,8 @@ pub fn default_redaction_markers() -> Vec<String> {
         "-redacted",
         "redacted_",
         "redacted-",
+        // Example / documentation keys (e.g. AWS AKIAIOSFODNN7EXAMPLE)
+        "example",
         // Documentation placeholders
         "placeholder",
         "your_token",

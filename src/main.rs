@@ -15,6 +15,7 @@ mod policy;
 mod process;
 mod rules;
 mod sandbox;
+mod scan;
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod tracer;
@@ -54,6 +55,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Init(args) => {
             init::run_init(args.force)
                 .context("Init failed")?;
+        }
+        Commands::Scan(args) => {
+            scan::run_scan(args)
+                .context("Scan failed")?;
         }
     }
 

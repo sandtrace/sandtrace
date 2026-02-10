@@ -68,6 +68,10 @@ async-trait = "0.1"
 # EDR: Futures utilities (StreamExt for signal handling)
 futures-util = "0.3"
 
+# Scan: Parallel filesystem scanning (absorbed from sandworm)
+rayon = "1.10"
+ignore = "0.4"
+
 [dev-dependencies]
 tempfile = "3.14"
 assert_cmd = "2.0"

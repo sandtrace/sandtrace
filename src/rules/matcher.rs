@@ -1,4 +1,4 @@
-use crate::event::{FileAccessEvent, RuleMatchEvent, Severity};
+use crate::event::{FileAccessEvent, FileAccessType, RuleMatchEvent, Severity};
 use crate::error::{RuleError, SandtraceError};
 use super::schema::DetectionRule;
 use chrono::Utc;
@@ -14,6 +14,8 @@ struct CompiledRule {
     file_path_patterns: Vec<glob::Pattern>,
     excluded_process_patterns: Vec<String>,
     content_regexes: Vec<Regex>,
+    /// Empty means match all access types
+    access_types: Vec<FileAccessType>,
 }
 
 impl RuleMatcher {
@@ -32,6 +34,13 @@ impl RuleMatcher {
 
         for compiled in &self.rules {
             if !self.file_path_matches(compiled, &event.path) {
+                continue;
+            }
+
+            // Filter by access type if the rule specifies them
+            if !compiled.access_types.is_empty()
+                && !compiled.access_types.contains(&event.access_type)
+            {
                 continue;
             }
 
@@ -58,6 +67,8 @@ impl RuleMatcher {
                 severity: compiled.rule.severity,
                 description: message,
                 matched_data: anonymize_path(&event.path),
+                file_path: event.path.clone(),
+                access_type: Some(event.access_type),
                 process_name: event.process_name.clone(),
                 pid: event.pid,
                 process_lineage: event.process_lineage.clone(),
@@ -148,11 +159,26 @@ fn compile_rule(rule: DetectionRule) -> Result<CompiledRule, SandtraceError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let access_types: Vec<FileAccessType> = rule
+        .detection
+        .access_types
+        .iter()
+        .filter_map(|s| match s.to_lowercase().as_str() {
+            "read" => Some(FileAccessType::Read),
+            "write" => Some(FileAccessType::Write),
+            "delete" => Some(FileAccessType::Delete),
+            "chmod" => Some(FileAccessType::Chmod),
+            "create" => Some(FileAccessType::Create),
+            _ => None,
+        })
+        .collect();
+
     Ok(CompiledRule {
         excluded_process_patterns: rule.detection.excluded_processes.clone(),
         rule,
         file_path_patterns,
         content_regexes,
+        access_types,
     })
 }
 
@@ -196,6 +222,7 @@ mod tests {
                 content_patterns: vec![],
                 process_names: vec![],
                 condition: None,
+                access_types: vec![],
             },
             alert: AlertConfig::default(),
             tags: vec!["credential".to_string()],

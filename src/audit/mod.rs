@@ -2,6 +2,7 @@ pub mod scanner;
 pub mod shai_hulud;
 
 use crate::cli::AuditArgs;
+use crate::config::{self, SandtraceConfig};
 use crate::error::SandtraceError;
 use crate::event::{AuditFinding, Severity};
 use crate::rules::RuleRegistry;
@@ -9,15 +10,27 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 
 pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
+    run_audit_with_config(args, &config::load_config())
+}
+
+pub fn run_audit_with_config(args: AuditArgs, config: &SandtraceConfig) -> Result<(), SandtraceError> {
     args.validate().map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
 
     // Load rules
     let mut registry = RuleRegistry::new();
     registry.load_builtins();
 
-    let rules_dir = expand_tilde(&args.rules);
+    let rules_dir = config::expand_tilde(&args.rules);
     if rules_dir.exists() {
         registry.load_directory(&rules_dir)?;
+    }
+
+    // Load additional rule directories from config
+    for additional_dir in &config.additional_rules {
+        let dir = config::expand_tilde_str(additional_dir);
+        if dir.exists() {
+            registry.load_directory(&dir)?;
+        }
     }
 
     let min_severity = args.min_severity();
@@ -37,13 +50,13 @@ pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
 
     for file_path in &files {
         // Shai-Hulud whitespace/obfuscation scanner
-        match shai_hulud::scan_file(file_path) {
+        match shai_hulud::scan_file(file_path, &config.shai_hulud) {
             Ok(mut file_findings) => findings.append(&mut file_findings),
             Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
         }
 
-        // Content scanner (credential patterns)
-        match scanner::scan_file_content(file_path) {
+        // Content scanner (credential patterns + custom patterns)
+        match scanner::scan_file_content(file_path, config) {
             Ok(mut file_findings) => findings.append(&mut file_findings),
             Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
         }
@@ -260,12 +273,3 @@ fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
     Ok(())
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
-    let path_str = path.to_string_lossy();
-    if path_str.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(format!("{}{}", home, &path_str[1..]));
-        }
-    }
-    path.to_path_buf()
-}

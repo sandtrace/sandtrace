@@ -1,3 +1,6 @@
+use crate::config::SandtraceConfig;
+#[cfg(test)]
+use crate::config::CustomPattern;
 use crate::event::{AuditFinding, Severity};
 use regex::Regex;
 use std::path::Path;
@@ -87,7 +90,10 @@ const CREDENTIAL_PATTERNS: &[ContentPattern] = &[
     },
 ];
 
-pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
+pub fn scan_file_content(
+    path: &Path,
+    config: &SandtraceConfig,
+) -> Result<Vec<AuditFinding>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     let file_path_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
@@ -104,8 +110,31 @@ pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Erro
         return Ok(findings);
     }
 
-    for pattern_def in CREDENTIAL_PATTERNS {
-        let regex = match Regex::new(pattern_def.pattern) {
+    // Build the full pattern list: built-in + custom from config
+    let mut all_patterns: Vec<ScanPattern> = CREDENTIAL_PATTERNS
+        .iter()
+        .map(|p| ScanPattern {
+            rule_id: p.rule_id.to_string(),
+            description: p.description.to_string(),
+            severity: p.severity,
+            pattern: p.pattern.to_string(),
+        })
+        .collect();
+
+    for custom in &config.custom_patterns {
+        let severity = parse_severity(&custom.severity);
+        all_patterns.push(ScanPattern {
+            rule_id: custom.id.clone(),
+            description: custom.description.clone(),
+            severity,
+            pattern: custom.pattern.clone(),
+        });
+    }
+
+    let redaction_markers = &config.redaction_markers;
+
+    for pattern_def in &all_patterns {
+        let regex = match Regex::new(&pattern_def.pattern) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -120,7 +149,7 @@ pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Erro
                 .take(3)
                 .collect();
             let context_text = check_lines.join(" ").to_lowercase();
-            if REDACTION_MARKERS.iter().any(|m| context_text.contains(m)) {
+            if redaction_markers.iter().any(|m| context_text.contains(m)) {
                 continue;
             }
 
@@ -153,16 +182,34 @@ pub fn scan_file_content(path: &Path) -> Result<Vec<AuditFinding>, std::io::Erro
             findings.push(AuditFinding {
                 file_path: file_path_str.clone(),
                 line_number: Some(line_number),
-                rule_id: pattern_def.rule_id.to_string(),
+                rule_id: pattern_def.rule_id.clone(),
                 severity: pattern_def.severity,
-                description: pattern_def.description.to_string(),
-                matched_pattern: pattern_def.pattern.to_string(),
+                description: pattern_def.description.clone(),
+                matched_pattern: pattern_def.pattern.clone(),
                 context_lines: context,
             });
         }
     }
 
     Ok(findings)
+}
+
+/// Runtime scan pattern (built-in or custom)
+struct ScanPattern {
+    rule_id: String,
+    description: String,
+    severity: Severity,
+    pattern: String,
+}
+
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Medium,
+    }
 }
 
 pub fn scan_supply_chain(dir: &Path) -> Vec<AuditFinding> {
@@ -231,6 +278,10 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn test_config() -> SandtraceConfig {
+        SandtraceConfig::default()
+    }
+
     #[test]
     fn test_detect_aws_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -238,7 +289,7 @@ mod tests {
         let mut file = std::fs::File::create(&file_path).unwrap();
         writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE';").unwrap();
 
-        let findings = scan_file_content(&file_path).unwrap();
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "cred-aws-key");
     }
@@ -251,9 +302,43 @@ mod tests {
         writeln!(file, "-----BEGIN RSA PRIVATE KEY-----").unwrap();
         writeln!(file, "MIIBogIBAAJBALRiMLAHudeSA/x3hB2f+2NRkJyBIZ").unwrap();
 
-        let findings = scan_file_content(&file_path).unwrap();
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "cred-private-key");
+    }
+
+    #[test]
+    fn test_custom_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("app.rs");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "let key = \"INTERNAL_ABCDEF0123456789ABCDEF0123456789\";").unwrap();
+
+        let mut config = test_config();
+        config.custom_patterns.push(CustomPattern {
+            id: "cred-internal-api".to_string(),
+            description: "Internal API key found".to_string(),
+            severity: "high".to_string(),
+            pattern: "INTERNAL_[A-Z0-9]{32}".to_string(),
+        });
+
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "cred-internal-api"));
+    }
+
+    #[test]
+    fn test_custom_redaction_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("config.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        // This line has a real-looking AWS key but also a custom redaction marker
+        writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE'; // test_fixture_value").unwrap();
+
+        let mut config = test_config();
+        config.redaction_markers.push("test_fixture_value".to_string());
+
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(findings.is_empty());
     }
 
     #[test]

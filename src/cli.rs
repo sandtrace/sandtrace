@@ -20,6 +20,9 @@ pub enum Commands {
 
     /// Audit a codebase for supply-chain threats and hidden payloads
     Audit(AuditArgs),
+
+    /// Initialize ~/.sandtrace/ with default config and rules
+    Init(InitArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -127,6 +130,13 @@ pub struct AuditArgs {
     pub no_color: bool,
 }
 
+#[derive(Parser, Debug)]
+pub struct InitArgs {
+    /// Overwrite existing config and rules
+    #[arg(long)]
+    pub force: bool,
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 pub enum AuditFormat {
     Terminal,
@@ -205,7 +215,7 @@ impl AuditArgs {
     }
 }
 
-fn parse_alert_channel(s: &str) -> Option<crate::event::AlertChannel> {
+pub fn parse_alert_channel(s: &str) -> Option<crate::event::AlertChannel> {
     match s {
         "stdout" => Some(crate::event::AlertChannel::Stdout),
         "desktop" => Some(crate::event::AlertChannel::Desktop),

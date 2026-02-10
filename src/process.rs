@@ -49,7 +49,15 @@ impl ProcessTree {
 
             if let Some(info) = self.lookup(current_pid) {
                 let next_pid = info.ppid;
+                // Stop at system/init processes — they add noise, not forensic value
+                let is_system = matches!(
+                    info.name.as_str(),
+                    "systemd" | "init" | "launchd" | "sshd"
+                ) || info.name.starts_with("init-systemd");
                 chain.push(info);
+                if is_system {
+                    break;
+                }
                 current_pid = next_pid;
             } else {
                 break;

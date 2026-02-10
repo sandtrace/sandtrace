@@ -98,6 +98,8 @@ pub struct RuleMatchEvent {
     pub severity: Severity,
     pub description: String,
     pub matched_data: String,
+    pub file_path: String,
+    pub access_type: Option<FileAccessType>,
     pub process_name: Option<String>,
     pub pid: Option<i32>,
     pub process_lineage: Vec<ProcessInfo>,

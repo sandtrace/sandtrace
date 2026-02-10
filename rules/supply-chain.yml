@@ -12,6 +12,7 @@ rules:
         - pnpm
         - yarn
         - node
+      access_types: [write, create, delete, chmod]
     alert:
       channels: [stdout, desktop]
       message: "node_modules tampered by {process_name} (PID: {pid}) — {path}"
@@ -28,6 +29,7 @@ rules:
       excluded_processes:
         - npm
         - npx
+      access_types: [write, create, delete, chmod]
     tags: [supply-chain, npm]
 
   - id: supply-chain-pip-conf
@@ -41,6 +43,7 @@ rules:
       excluded_processes:
         - pip
         - pip3
+      access_types: [write, create, delete, chmod]
     tags: [supply-chain, python]
 
   - id: supply-chain-cargo-registry
@@ -53,6 +56,7 @@ rules:
       excluded_processes:
         - cargo
         - rustup
+      access_types: [write, create, delete, chmod]
     alert:
       channels: [stdout, desktop]
       message: "Cargo registry tampered by {process_name} (PID: {pid})"
@@ -69,4 +73,5 @@ rules:
       excluded_processes:
         - composer
         - php
+      access_types: [write, create, delete, chmod]
     tags: [supply-chain, php]

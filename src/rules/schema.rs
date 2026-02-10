@@ -37,6 +37,10 @@ pub struct Detection {
     pub process_names: Vec<String>,
     #[serde(default)]
     pub condition: Option<String>,
+    /// Which access types trigger this rule. Empty = all types.
+    /// Valid values: read, write, delete, chmod, create
+    #[serde(default)]
+    pub access_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

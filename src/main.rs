@@ -6,8 +6,10 @@ use std::sync::Arc;
 mod alert;
 mod audit;
 mod cli;
+mod config;
 mod error;
 mod event;
+mod init;
 mod output;
 mod policy;
 mod process;
@@ -48,6 +50,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Audit(args) => {
             audit::run_audit(args)
                 .context("Audit failed")?;
+        }
+        Commands::Init(args) => {
+            init::run_init(args.force)
+                .context("Init failed")?;
         }
     }
 

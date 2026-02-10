@@ -353,7 +353,10 @@ mod tests {
         writeln!(file, "const key = 'AKIAIOSFODNN7EXAMPLE';").unwrap();
 
         let findings = scan_file_content(&file_path, &test_config()).unwrap();
-        assert!(findings.is_empty(), "EXAMPLE keys should be skipped by redaction markers");
+        assert!(
+            findings.is_empty(),
+            "EXAMPLE keys should be skipped by redaction markers"
+        );
     }
 
     #[test]

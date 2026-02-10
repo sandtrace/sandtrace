@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub async fn start_monitoring(
-    watch_paths: Vec<PathBuf>,
+    watch_entries: Vec<(PathBuf, bool)>,
     handler: Arc<EventHandler>,
 ) -> Result<(), SandtraceError> {
     let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(256);
@@ -25,8 +25,8 @@ pub async fn start_monitoring(
     })?;
 
     // Add watches for each path
-    for path in &watch_paths {
-        let mode = if path.is_dir() {
+    for (path, recursive) in &watch_entries {
+        let mode = if *recursive {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
@@ -95,38 +95,57 @@ fn convert_notify_event(event: Event) -> Option<FileAccessEvent> {
     })
 }
 
-fn detect_accessor(_path: &str) -> (Option<i32>, Option<String>) {
-    // Best-effort: scan /proc for processes with open file descriptors to this path
-    // This is inherently racy but provides useful forensic context
+fn detect_accessor(path: &str) -> (Option<i32>, Option<String>) {
+    let our_pid = std::process::id() as i32;
+
+    // Strategy 1: Check /proc/<pid>/fd for open file handles (works for long-lived processes)
+    // Collect PIDs and sort descending (newer processes first, more likely to be the accessor)
+    let mut pids: Vec<i32> = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            // Skip non-PID directories
-            if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                continue;
+            let name_str = entry.file_name();
+            if let Ok(pid) = name_str.to_string_lossy().parse::<i32>() {
+                if pid != our_pid {
+                    pids.push(pid);
+                }
             }
+        }
+    }
+    pids.sort_unstable_by(|a, b| b.cmp(a)); // newest first
 
-            let pid: i32 = match name_str.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            // Skip our own process
-            if pid == std::process::id() as i32 {
-                continue;
+    for pid in &pids {
+        let fd_dir = format!("/proc/{}/fd", pid);
+        if let Ok(fds) = std::fs::read_dir(&fd_dir) {
+            for fd in fds.flatten() {
+                if let Ok(target) = std::fs::read_link(fd.path()) {
+                    if target.to_string_lossy() == path {
+                        let name = crate::process::get_process_name(*pid);
+                        return (Some(*pid), name);
+                    }
+                }
             }
+        }
+    }
 
-            // Check /proc/<pid>/fd for open file handles to this path
-            let fd_dir = entry.path().join("fd");
-            if let Ok(fds) = std::fs::read_dir(&fd_dir) {
-                for fd in fds.flatten() {
-                    if let Ok(target) = std::fs::read_link(fd.path()) {
-                        if target.to_string_lossy() == _path {
-                            let name = crate::process::get_process_name(pid);
-                            return (Some(pid), name);
-                        }
+    // Strategy 2: Check /proc/<pid>/cmdline for processes that reference this file path
+    // (catches cases where the fd is already closed but the process is still running)
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    if !file_name.is_empty() {
+        for pid in &pids {
+            let cmdline_path = format!("/proc/{}/cmdline", pid);
+            if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                // cmdline uses NUL separators
+                let args = cmdline.replace('\0', " ");
+                if args.contains(path) || args.contains(file_name) {
+                    let name = crate::process::get_process_name(*pid);
+                    // Skip shell processes that just happen to have the path in their env
+                    let name_str = name.as_deref().unwrap_or("");
+                    if !matches!(name_str, "bash" | "zsh" | "sh" | "fish") {
+                        return (Some(*pid), name);
                     }
                 }
             }

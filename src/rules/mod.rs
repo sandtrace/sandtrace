@@ -78,6 +78,17 @@ impl RuleRegistry {
         Ok(count)
     }
 
+    /// Load rules from multiple directories, skipping those that don't exist
+    pub fn load_directories(&mut self, dirs: &[std::path::PathBuf]) -> Result<usize, SandtraceError> {
+        let mut total = 0;
+        for dir in dirs {
+            if dir.exists() {
+                total += self.load_directory(dir)?;
+            }
+        }
+        Ok(total)
+    }
+
     pub fn rules(&self) -> &[DetectionRule] {
         &self.rules
     }

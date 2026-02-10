@@ -1,0 +1,67 @@
+# SandTrace global configuration
+# Place at: ~/.sandtrace/config.toml
+# Generate defaults with: sandtrace init
+
+# Primary rules directory
+rules_dir = "~/.sandtrace/rules"
+
+# Additional rule directories (e.g. community packs)
+# Rules from all directories are merged at runtime.
+additional_rules = []
+# additional_rules = ["~/.sandtrace/community-rules"]
+
+# Default alert channels for watch mode
+# Options: "stdout", "desktop", "syslog", "webhook:<url>"
+# CLI --alert flags override these.
+default_alerts = ["stdout"]
+
+# Redaction markers — lines containing these are skipped during audit.
+# Prevents false positives on documentation samples, env var lookups,
+# template variables, and dynamic value construction.
+redaction_markers = [
+  # Explicit redaction
+  "_redacted", "-redacted", "redacted_", "redacted-",
+  # Documentation placeholders
+  "placeholder", "your_token", "your-token",
+  "your_key", "your-key", "your_secret", "your-secret",
+  "your_password", "your-password",
+  "changeme", "replace_me", "replace-me",
+  "sample_token", "sample-token", "sample_key", "sample-key",
+  "dummy_token", "dummy-token", "fake_token", "fake-token",
+  # Placeholder/dummy values
+  "your-api", "your_api", "your_access", "your-access",
+  "your_bearer", "your-bearer", "key-xxxx", "xxxx",
+  # Template variables (Helm, Jinja, env substitution)
+  "{{ .", "{{.", "{{ $", "{{$", "${", "$(", "<%=",
+  # Dynamic value lookups (not hardcoded)
+  "config(", "env(", "getenv(", "process.env",
+  "os.environ", "vault.", "ssm.", "secrets.",
+  # Logging/debugging (showing truncated values, not hardcoding)
+  "log::", "logger.", "console.log", "this->error(", "this->info(",
+  "str::take(", "substr(",
+  # String concatenation (dynamic values, not hardcoded)
+  "'.$", "\".$", "' .", "\" .",
+]
+
+# Shai-Hulud obfuscation scanner settings
+[shai_hulud]
+# Flag lines with more than this many trailing spaces
+max_trailing_spaces = 20
+# Flag suspicious content hidden past this column
+steganographic_column = 200
+
+# Custom credential patterns for audit scanning.
+# Each [[custom_patterns]] block adds a regex matched against file contents.
+# These are appended to the built-in credential patterns.
+#
+# [[custom_patterns]]
+# id = "cred-internal-api"
+# description = "Internal API key found in source"
+# severity = "high"
+# pattern = 'INTERNAL_[A-Z0-9]{32}'
+#
+# [[custom_patterns]]
+# id = "cred-company-token"
+# description = "Company-specific token format"
+# severity = "critical"
+# pattern = 'ACME_[a-zA-Z0-9]{40}'

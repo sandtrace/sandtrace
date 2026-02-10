@@ -1,8 +1,6 @@
+use crate::config::ShaiHuludConfig;
 use crate::event::{AuditFinding, Severity};
 use std::path::Path;
-
-const MAX_TRAILING_SPACES: usize = 20;
-const STEGANOGRAPHIC_COLUMN: usize = 200;
 
 /// Patterns that indicate the hidden portion of a long line is actually malicious,
 /// not just a normal long SQL statement or seed data array.
@@ -46,10 +44,13 @@ fn is_minified(lines: &[&str]) -> bool {
     lines.iter().any(|line| line.len() > 5000)
 }
 
-pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
+pub fn scan_file(path: &Path, shai_config: &ShaiHuludConfig) -> Result<Vec<AuditFinding>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     let file_path_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
+
+    let max_trailing = shai_config.max_trailing_spaces;
+    let steg_column = shai_config.steganographic_column;
 
     let lines: Vec<&str> = content.lines().collect();
     let skip_hidden_content = is_non_executable(path) || is_minified(&lines);
@@ -67,7 +68,7 @@ pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
 
         // 1. Excessive trailing whitespace (steganographic payload indicator)
         let trailing_spaces = line.len() - line.trim_end().len();
-        if trailing_spaces > MAX_TRAILING_SPACES {
+        if trailing_spaces > max_trailing {
             findings.push(AuditFinding {
                 file_path: file_path_str.clone(),
                 line_number: Some(line_number),
@@ -86,14 +87,14 @@ pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
             });
         }
 
-        // 2. Content past column 200 (hidden payload past visible area)
+        // 2. Content past steganographic column (hidden payload past visible area)
         // Skip for non-executable files where long lines are normal (markdown, JSON, logs, etc.)
         // Only flag as Critical if the hidden portion contains suspicious patterns;
         // otherwise downgrade to Info (normal long lines in source code).
         let char_count = line.chars().count();
-        if !skip_hidden_content && char_count > STEGANOGRAPHIC_COLUMN {
-            let visible: String = line.chars().take(STEGANOGRAPHIC_COLUMN).collect();
-            let hidden: String = line.chars().skip(STEGANOGRAPHIC_COLUMN).collect();
+        if !skip_hidden_content && char_count > steg_column {
+            let visible: String = line.chars().take(steg_column).collect();
+            let hidden: String = line.chars().skip(steg_column).collect();
             if !hidden.trim().is_empty() {
                 let hidden_lower = hidden.to_lowercase();
                 let is_suspicious = SUSPICIOUS_PATTERNS.iter().any(|p| hidden_lower.contains(p));
@@ -108,10 +109,10 @@ pub fn scan_file(path: &Path) -> Result<Vec<AuditFinding>, std::io::Error> {
                         severity: Severity::Critical,
                         description: format!(
                             "Suspicious hidden content past column {} ({} hidden chars)",
-                            STEGANOGRAPHIC_COLUMN,
+                            steg_column,
                             hidden.len()
                         ),
-                        matched_pattern: format!("suspicious content past column {}", STEGANOGRAPHIC_COLUMN),
+                        matched_pattern: format!("suspicious content past column {}", steg_column),
                         context_lines: vec![
                             format!("visible: {}...", visible_preview),
                             format!("hidden:  {}", hidden_preview),
@@ -290,6 +291,10 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn test_shai_config() -> ShaiHuludConfig {
+        ShaiHuludConfig::default()
+    }
+
     #[test]
     fn test_detect_trailing_whitespace() {
         let dir = tempfile::tempdir().unwrap();
@@ -298,7 +303,7 @@ mod tests {
         // Write a line with 30 trailing spaces
         write!(file, "const x = 1;{}", " ".repeat(30)).unwrap();
 
-        let findings = scan_file(&file_path).unwrap();
+        let findings = scan_file(&file_path, &test_shai_config()).unwrap();
         assert!(!findings.is_empty());
         assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
     }
@@ -309,17 +314,39 @@ mod tests {
         let file_path = dir.path().join("test.js");
         let mut file = std::fs::File::create(&file_path).unwrap();
         // Write visible content + hidden content past column 200
+        let config = test_shai_config();
         let visible = "const x = 1;";
-        let padding = " ".repeat(STEGANOGRAPHIC_COLUMN - visible.len());
+        let padding = " ".repeat(config.steganographic_column - visible.len());
         let hidden = "eval(atob('malicious'))";
         write!(file, "{}{}{}", visible, padding, hidden).unwrap();
 
-        let findings = scan_file(&file_path).unwrap();
+        let findings = scan_file(&file_path, &config).unwrap();
         let hidden_findings: Vec<_> = findings
             .iter()
             .filter(|f| f.rule_id == "shai-hulud-hidden-content")
             .collect();
         assert!(!hidden_findings.is_empty());
+    }
+
+    #[test]
+    fn test_custom_trailing_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        // 15 trailing spaces — below default 20, but above custom 10
+        write!(file, "const x = 1;{}", " ".repeat(15)).unwrap();
+
+        // Default config: should NOT flag (15 < 20)
+        let findings = scan_file(&file_path, &test_shai_config()).unwrap();
+        assert!(!findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
+
+        // Custom config with lower threshold: SHOULD flag (15 > 10)
+        let custom = ShaiHuludConfig {
+            max_trailing_spaces: 10,
+            steganographic_column: 200,
+        };
+        let findings = scan_file(&file_path, &custom).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
     }
 
     #[test]
@@ -330,7 +357,7 @@ mod tests {
         // Zero-width space injected into variable name
         write!(file, "const my\u{200B}Var = 'hello';").unwrap();
 
-        let findings = scan_file(&file_path).unwrap();
+        let findings = scan_file(&file_path, &test_shai_config()).unwrap();
         assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-invisible-chars"));
     }
 
@@ -342,7 +369,7 @@ mod tests {
         writeln!(file, "const x = 1;").unwrap();
         writeln!(file, "console.log(x);").unwrap();
 
-        let findings = scan_file(&file_path).unwrap();
+        let findings = scan_file(&file_path, &test_shai_config()).unwrap();
         assert!(findings.is_empty());
     }
 }

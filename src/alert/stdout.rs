@@ -17,25 +17,40 @@ impl super::AlertDispatcher for StdoutAlert {
         let severity = format_severity(event.severity);
         let timestamp = event.timestamp.format("%H:%M:%S%.3f");
 
-        let proc_info = if let Some(ref name) = event.process_name {
-            format!(
-                " [{}:{}]",
-                name,
-                event.pid.map_or("?".to_string(), |p| p.to_string())
-            )
-        } else {
-            String::new()
-        };
+        let pid_str = event.pid.map_or("?".to_string(), |p| p.to_string());
+        let proc_name = event.process_name.as_deref().unwrap_or("unknown");
 
         eprintln!(
-            "{} {} {} {}{} — {}",
+            "{} {} {} {} — {}",
             timestamp.to_string().dimmed(),
             "ALERT".red().bold(),
             severity,
             event.rule_name.bold(),
-            proc_info.cyan(),
             event.description,
         );
+        let access_str = event.access_type
+            .map(|a| format!(" [{}]", a))
+            .unwrap_or_default();
+
+        eprintln!(
+            "    {} {}{} | {} {}",
+            "file:".dimmed(),
+            event.file_path.yellow(),
+            access_str.magenta(),
+            "pid:".dimmed(),
+            format!("{} ({})", pid_str, proc_name).cyan(),
+        );
+        if !event.process_lineage.is_empty() {
+            let lineage: Vec<String> = event.process_lineage
+                .iter()
+                .map(|p| format!("{}[{}]", p.name, p.pid))
+                .collect();
+            eprintln!(
+                "    {} {}",
+                "lineage:".dimmed(),
+                lineage.join(" > ").dimmed(),
+            );
+        }
 
         Ok(())
     }

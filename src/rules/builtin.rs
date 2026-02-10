@@ -27,7 +27,10 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             },
             alert: AlertConfig {
                 channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
-                message: Some("Suspicious access to AWS credentials by {process_name} (PID: {pid})".to_string()),
+                message: Some(
+                    "Suspicious access to AWS credentials by {process_name} (PID: {pid})"
+                        .to_string(),
+                ),
             },
             tags: vec!["credential".to_string(), "aws".to_string()],
             enabled: Some(true),
@@ -58,7 +61,9 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             },
             alert: AlertConfig {
                 channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
-                message: Some("Suspicious access to SSH keys by {process_name} (PID: {pid})".to_string()),
+                message: Some(
+                    "Suspicious access to SSH keys by {process_name} (PID: {pid})".to_string(),
+                ),
             },
             tags: vec!["credential".to_string(), "ssh".to_string()],
             enabled: Some(true),
@@ -92,10 +97,7 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             severity: Severity::High,
             description: "Non-standard process accessing npm credentials".to_string(),
             detection: Detection {
-                file_paths: vec![
-                    "~/.npmrc".to_string(),
-                    "~/.config/npm/*".to_string(),
-                ],
+                file_paths: vec!["~/.npmrc".to_string(), "~/.config/npm/*".to_string()],
                 excluded_processes: vec![
                     "npm".to_string(),
                     "npx".to_string(),
@@ -256,10 +258,7 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             description: "Non-standard process accessing Triton/Joyent credentials".to_string(),
             detection: Detection {
                 file_paths: vec!["~/.triton/*".to_string()],
-                excluded_processes: vec![
-                    "triton".to_string(),
-                    "node".to_string(),
-                ],
+                excluded_processes: vec!["triton".to_string(), "node".to_string()],
                 file_patterns: vec![],
                 content_patterns: vec![],
                 process_names: vec![],
@@ -300,10 +299,7 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             description: "Non-standard process accessing Git stored credentials".to_string(),
             detection: Detection {
                 file_paths: vec!["~/.git-credentials".to_string()],
-                excluded_processes: vec![
-                    "git".to_string(),
-                    "git-credential-store".to_string(),
-                ],
+                excluded_processes: vec!["git".to_string(), "git-credential-store".to_string()],
                 file_patterns: vec![],
                 content_patterns: vec![],
                 process_names: vec![],
@@ -321,10 +317,7 @@ pub fn credential_access_rules() -> Vec<DetectionRule> {
             description: "Non-standard process accessing Control Plane credentials".to_string(),
             detection: Detection {
                 file_paths: vec!["~/.config/cpln/*".to_string()],
-                excluded_processes: vec![
-                    "cpln".to_string(),
-                    "node".to_string(),
-                ],
+                excluded_processes: vec!["cpln".to_string(), "node".to_string()],
                 file_patterns: vec![],
                 content_patterns: vec![],
                 process_names: vec![],
@@ -358,11 +351,18 @@ pub fn supply_chain_rules() -> Vec<DetectionRule> {
                 content_patterns: vec![],
                 process_names: vec![],
                 condition: None,
-                access_types: vec!["write".into(), "create".into(), "delete".into(), "chmod".into()],
+                access_types: vec![
+                    "write".into(),
+                    "create".into(),
+                    "delete".into(),
+                    "chmod".into(),
+                ],
             },
             alert: AlertConfig {
                 channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
-                message: Some("node_modules tampered by {process_name} (PID: {pid}) — {path}".to_string()),
+                message: Some(
+                    "node_modules tampered by {process_name} (PID: {pid}) — {path}".to_string(),
+                ),
             },
             tags: vec!["supply-chain".to_string(), "node".to_string()],
             enabled: Some(true),
@@ -373,19 +373,18 @@ pub fn supply_chain_rules() -> Vec<DetectionRule> {
             severity: Severity::High,
             description: "Unexpected modification of .npmrc registry configuration".to_string(),
             detection: Detection {
-                file_paths: vec![
-                    "**/.npmrc".to_string(),
-                    "~/.npmrc".to_string(),
-                ],
-                excluded_processes: vec![
-                    "npm".to_string(),
-                    "npx".to_string(),
-                ],
+                file_paths: vec!["**/.npmrc".to_string(), "~/.npmrc".to_string()],
+                excluded_processes: vec!["npm".to_string(), "npx".to_string()],
                 file_patterns: vec![],
                 content_patterns: vec![],
                 process_names: vec![],
                 condition: None,
-                access_types: vec!["write".into(), "create".into(), "delete".into(), "chmod".into()],
+                access_types: vec![
+                    "write".into(),
+                    "create".into(),
+                    "delete".into(),
+                    "chmod".into(),
+                ],
             },
             alert: AlertConfig::default(),
             tags: vec!["supply-chain".to_string(), "npm".to_string()],
@@ -406,7 +405,12 @@ pub fn supply_chain_rules() -> Vec<DetectionRule> {
                 content_patterns: vec![],
                 process_names: vec![],
                 condition: None,
-                access_types: vec!["write".into(), "create".into(), "delete".into(), "chmod".into()],
+                access_types: vec![
+                    "write".into(),
+                    "create".into(),
+                    "delete".into(),
+                    "chmod".into(),
+                ],
             },
             alert: AlertConfig::default(),
             tags: vec!["supply-chain".to_string(), "python".to_string()],
@@ -416,26 +420,24 @@ pub fn supply_chain_rules() -> Vec<DetectionRule> {
 }
 
 pub fn exfiltration_rules() -> Vec<DetectionRule> {
-    vec![
-        DetectionRule {
-            id: "exfil-curl-unknown".to_string(),
-            name: "Curl to External Host".to_string(),
-            severity: Severity::Medium,
-            description: "curl/wget making outbound request during build or install".to_string(),
-            detection: Detection {
-                file_paths: vec![],
-                excluded_processes: vec![],
-                file_patterns: vec![],
-                content_patterns: vec![],
-                process_names: vec!["curl".to_string(), "wget".to_string()],
-                condition: Some("process_spawn AND process_name IN names".to_string()),
-                access_types: vec![],
-            },
-            alert: AlertConfig::default(),
-            tags: vec!["exfiltration".to_string(), "network".to_string()],
-            enabled: Some(true),
+    vec![DetectionRule {
+        id: "exfil-curl-unknown".to_string(),
+        name: "Curl to External Host".to_string(),
+        severity: Severity::Medium,
+        description: "curl/wget making outbound request during build or install".to_string(),
+        detection: Detection {
+            file_paths: vec![],
+            excluded_processes: vec![],
+            file_patterns: vec![],
+            content_patterns: vec![],
+            process_names: vec!["curl".to_string(), "wget".to_string()],
+            condition: Some("process_spawn AND process_name IN names".to_string()),
+            access_types: vec![],
         },
-    ]
+        alert: AlertConfig::default(),
+        tags: vec!["exfiltration".to_string(), "network".to_string()],
+        enabled: Some(true),
+    }]
 }
 
 pub fn all_builtin_rules() -> Vec<DetectionRule> {

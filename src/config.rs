@@ -73,27 +73,70 @@ impl Default for SandtraceConfig {
 pub fn default_redaction_markers() -> Vec<String> {
     vec![
         // Explicit redaction
-        "_redacted", "-redacted", "redacted_", "redacted-",
+        "_redacted",
+        "-redacted",
+        "redacted_",
+        "redacted-",
         // Documentation placeholders
-        "placeholder", "your_token", "your-token",
-        "your_key", "your-key", "your_secret", "your-secret",
-        "your_password", "your-password",
-        "changeme", "replace_me", "replace-me",
-        "sample_token", "sample-token", "sample_key", "sample-key",
-        "dummy_token", "dummy-token", "fake_token", "fake-token",
+        "placeholder",
+        "your_token",
+        "your-token",
+        "your_key",
+        "your-key",
+        "your_secret",
+        "your-secret",
+        "your_password",
+        "your-password",
+        "changeme",
+        "replace_me",
+        "replace-me",
+        "sample_token",
+        "sample-token",
+        "sample_key",
+        "sample-key",
+        "dummy_token",
+        "dummy-token",
+        "fake_token",
+        "fake-token",
         // Placeholder/dummy values
-        "your-api", "your_api", "your_access", "your-access",
-        "your_bearer", "your-bearer", "key-xxxx", "xxxx",
+        "your-api",
+        "your_api",
+        "your_access",
+        "your-access",
+        "your_bearer",
+        "your-bearer",
+        "key-xxxx",
+        "xxxx",
         // Template variables (Helm, Jinja, env substitution)
-        "{{ .", "{{.", "{{ $", "{{$", "${", "$(", "<%=",
+        "{{ .",
+        "{{.",
+        "{{ $",
+        "{{$",
+        "${",
+        "$(",
+        "<%=",
         // Dynamic value lookups (not hardcoded)
-        "config(", "env(", "getenv(", "process.env",
-        "os.environ", "vault.", "ssm.", "secrets.",
+        "config(",
+        "env(",
+        "getenv(",
+        "process.env",
+        "os.environ",
+        "vault.",
+        "ssm.",
+        "secrets.",
         // Logging/debugging (showing truncated values, not hardcoding)
-        "log::", "logger.", "console.log", "this->error(", "this->info(",
-        "str::take(", "substr(",
+        "log::",
+        "logger.",
+        "console.log",
+        "this->error(",
+        "this->info(",
+        "str::take(",
+        "substr(",
         // String concatenation (dynamic values, not hardcoded)
-        "'.$", "\".$", "' .", "\" .",
+        "'.$",
+        "\".$",
+        "' .",
+        "\" .",
     ]
     .into_iter()
     .map(String::from)
@@ -215,7 +258,9 @@ mod tests {
         assert!(!config.redaction_markers.is_empty());
         assert!(config.redaction_markers.contains(&"_redacted".to_string()));
         assert!(config.redaction_markers.contains(&"changeme".to_string()));
-        assert!(config.redaction_markers.contains(&"process.env".to_string()));
+        assert!(config
+            .redaction_markers
+            .contains(&"process.env".to_string()));
     }
 
     #[test]

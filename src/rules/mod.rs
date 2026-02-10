@@ -66,11 +66,7 @@ impl RuleRegistry {
         })?;
 
         let rule_file: RuleFile = serde_yml::from_str(&content).map_err(|e| {
-            SandtraceError::Rule(RuleError::YamlParse(format!(
-                "{}: {}",
-                path.display(),
-                e
-            )))
+            SandtraceError::Rule(RuleError::YamlParse(format!("{}: {}", path.display(), e)))
         })?;
 
         let count = rule_file.rules.len();
@@ -79,7 +75,10 @@ impl RuleRegistry {
     }
 
     /// Load rules from multiple directories, skipping those that don't exist
-    pub fn load_directories(&mut self, dirs: &[std::path::PathBuf]) -> Result<usize, SandtraceError> {
+    pub fn load_directories(
+        &mut self,
+        dirs: &[std::path::PathBuf],
+    ) -> Result<usize, SandtraceError> {
         let mut total = 0;
         for dir in dirs {
             if dir.exists() {

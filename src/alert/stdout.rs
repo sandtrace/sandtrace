@@ -28,7 +28,8 @@ impl super::AlertDispatcher for StdoutAlert {
             event.rule_name.bold(),
             event.description,
         );
-        let access_str = event.access_type
+        let access_str = event
+            .access_type
             .map(|a| format!(" [{}]", a))
             .unwrap_or_default();
 
@@ -41,7 +42,8 @@ impl super::AlertDispatcher for StdoutAlert {
             format!("{} ({})", pid_str, proc_name).cyan(),
         );
         if !event.process_lineage.is_empty() {
-            let lineage: Vec<String> = event.process_lineage
+            let lineage: Vec<String> = event
+                .process_lineage
                 .iter()
                 .map(|p| format!("{}[{}]", p.name, p.pid))
                 .collect();

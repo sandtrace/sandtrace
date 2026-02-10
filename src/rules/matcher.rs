@@ -1,6 +1,6 @@
-use crate::event::{FileAccessEvent, FileAccessType, RuleMatchEvent, Severity};
-use crate::error::{RuleError, SandtraceError};
 use super::schema::DetectionRule;
+use crate::error::{RuleError, SandtraceError};
+use crate::event::{FileAccessEvent, FileAccessType, RuleMatchEvent, Severity};
 use chrono::Utc;
 use regex::Regex;
 use std::path::Path;
@@ -45,7 +45,11 @@ impl RuleMatcher {
             }
 
             if let Some(ref proc_name) = event.process_name {
-                if compiled.excluded_process_patterns.iter().any(|p| p == proc_name) {
+                if compiled
+                    .excluded_process_patterns
+                    .iter()
+                    .any(|p| p == proc_name)
+                {
                     continue;
                 }
             }
@@ -56,8 +60,14 @@ impl RuleMatcher {
                 .message
                 .as_deref()
                 .unwrap_or(&compiled.rule.description)
-                .replace("{process_name}", event.process_name.as_deref().unwrap_or("unknown"))
-                .replace("{pid}", &event.pid.map_or("?".to_string(), |p| p.to_string()))
+                .replace(
+                    "{process_name}",
+                    event.process_name.as_deref().unwrap_or("unknown"),
+                )
+                .replace(
+                    "{pid}",
+                    &event.pid.map_or("?".to_string(), |p| p.to_string()),
+                )
                 .replace("{path}", &event.path);
 
             matches.push(RuleMatchEvent {

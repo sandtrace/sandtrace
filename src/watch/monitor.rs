@@ -40,9 +40,11 @@ pub async fn start_monitoring(
     eprintln!("Sandtrace watching... Press Ctrl+C to stop.");
 
     // Setup signal handler for graceful shutdown
-    let mut sigterm =
-        signal_hook_tokio::Signals::new(&[signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT])
-            .map_err(|e| SandtraceError::Io(e))?;
+    let mut sigterm = signal_hook_tokio::Signals::new(&[
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ])
+    .map_err(|e| SandtraceError::Io(e))?;
 
     loop {
         tokio::select! {

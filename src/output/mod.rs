@@ -15,7 +15,11 @@ pub struct OutputManager {
 }
 
 impl OutputManager {
-    pub fn new(jsonl_output: Option<std::fs::File>, terminal_verbosity: u8, no_color: bool) -> Self {
+    pub fn new(
+        jsonl_output: Option<std::fs::File>,
+        terminal_verbosity: u8,
+        no_color: bool,
+    ) -> Self {
         let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
         let output_to_file = jsonl_output.is_some();
 

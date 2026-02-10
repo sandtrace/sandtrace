@@ -17,7 +17,7 @@ impl TerminalWriter {
     pub fn new(verbosity: u8, no_color: bool) -> Self {
         // Disable colors if requested or if NO_COLOR env var is set
         let no_color = no_color || std::env::var("NO_COLOR").is_ok();
-        
+
         if no_color {
             colored::control::set_override(false);
         }
@@ -45,13 +45,15 @@ impl TerminalWriter {
     fn should_show_syscall(&self, event: &SyscallEvent) -> bool {
         match self.verbosity {
             0 => event.action == PolicyAction::Deny || event.action == PolicyAction::Kill,
-            1 => matches!(
-                event.category,
-                SyscallCategory::FileRead
-                    | SyscallCategory::FileWrite
-                    | SyscallCategory::Network
-                    | SyscallCategory::Process
-            ) || event.action != PolicyAction::Allow,
+            1 => {
+                matches!(
+                    event.category,
+                    SyscallCategory::FileRead
+                        | SyscallCategory::FileWrite
+                        | SyscallCategory::Network
+                        | SyscallCategory::Process
+                ) || event.action != PolicyAction::Allow
+            }
             2 => true,
             _ => true,
         }
@@ -104,7 +106,12 @@ impl TerminalWriter {
 
     fn format_process_event(&self, event: &ProcessEvent) -> String {
         match event {
-            ProcessEvent::Exec { timestamp, pid, path, argv } => {
+            ProcessEvent::Exec {
+                timestamp,
+                pid,
+                path,
+                argv,
+            } => {
                 let ts = self.format_timestamp(*timestamp);
                 let args = argv.join(" ");
                 format!(
@@ -116,7 +123,11 @@ impl TerminalWriter {
                     args.dimmed()
                 )
             }
-            ProcessEvent::Spawned { timestamp, parent_pid, child_pid } => {
+            ProcessEvent::Spawned {
+                timestamp,
+                parent_pid,
+                child_pid,
+            } => {
                 let ts = self.format_timestamp(*timestamp);
                 format!(
                     "{} {} [{}] fork -> [{}]",
@@ -126,7 +137,11 @@ impl TerminalWriter {
                     child_pid.to_string().cyan()
                 )
             }
-            ProcessEvent::Exited { timestamp, pid, exit_code } => {
+            ProcessEvent::Exited {
+                timestamp,
+                pid,
+                exit_code,
+            } => {
                 let ts = self.format_timestamp(*timestamp);
                 let code_str = if *exit_code == 0 {
                     exit_code.to_string().green()
@@ -141,7 +156,11 @@ impl TerminalWriter {
                     code_str
                 )
             }
-            ProcessEvent::Signaled { timestamp, pid, signal } => {
+            ProcessEvent::Signaled {
+                timestamp,
+                pid,
+                signal,
+            } => {
                 let ts = self.format_timestamp(*timestamp);
                 format!(
                     "{} {} [{}] signal {}",
@@ -160,7 +179,10 @@ impl TerminalWriter {
         lines.push("TRACE SUMMARY".bold().to_string());
         lines.push(format!("  Total syscalls: {}", summary.total_syscalls));
         lines.push(format!("  Unique syscalls: {}", summary.unique_syscalls));
-        lines.push(format!("  Denied: {}", summary.denied_count.to_string().red()));
+        lines.push(format!(
+            "  Denied: {}",
+            summary.denied_count.to_string().red()
+        ));
         lines.push(format!("  Processes: {}", summary.process_count));
         lines.push(format!("  Duration: {}ms", summary.duration_ms));
         lines.push(format!("  Exit code: {}", summary.exit_code));
@@ -187,11 +209,22 @@ impl TerminalWriter {
             crate::event::FileAccessType::Create => "CREATE".green(),
         };
         let proc_info = if let Some(ref name) = event.process_name {
-            format!(" by {} (pid: {})", name.cyan(), event.pid.map_or("?".to_string(), |p| p.to_string()))
+            format!(
+                " by {} (pid: {})",
+                name.cyan(),
+                event.pid.map_or("?".to_string(), |p| p.to_string())
+            )
         } else {
             String::new()
         };
-        format!("{} {} {} {}{}", ts.dimmed(), "FILE".blue().bold(), access, event.path.yellow(), proc_info)
+        format!(
+            "{} {} {} {}{}",
+            ts.dimmed(),
+            "FILE".blue().bold(),
+            access,
+            event.path.yellow(),
+            proc_info
+        )
     }
 
     fn format_rule_match_event(&self, event: &RuleMatchEvent) -> String {

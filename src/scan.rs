@@ -93,8 +93,17 @@ pub fn run_scan(args: ScanArgs) -> Result<()> {
             let name = entry.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),
-                "node_modules" | ".git" | "vendor" | ".pnpm" | "dist" | "build" | ".cache"
-                    | "__pycache__" | ".venv" | "venv" | ".tox"
+                "node_modules"
+                    | ".git"
+                    | "vendor"
+                    | ".pnpm"
+                    | "dist"
+                    | "build"
+                    | ".cache"
+                    | "__pycache__"
+                    | ".venv"
+                    | "venv"
+                    | ".tox"
             )
         })
         .build()

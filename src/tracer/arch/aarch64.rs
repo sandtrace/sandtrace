@@ -49,9 +49,7 @@ impl Architecture for Aarch64Arch {
 
     fn syscall_args(&self, regs: &super::RawRegisters) -> [u64; 6] {
         match regs {
-            super::RawRegisters::Aarch64(r) => {
-                [r.x(0), r.x(1), r.x(2), r.x(3), r.x(4), r.x(5)]
-            }
+            super::RawRegisters::Aarch64(r) => [r.x(0), r.x(1), r.x(2), r.x(3), r.x(4), r.x(5)],
             _ => [0; 6],
         }
     }
@@ -95,7 +93,7 @@ pub fn read_registers(pid: Pid) -> Result<UserRegs> {
 
     // On aarch64, use PTRACE_GETREGSET with NT_PRSTATUS
     let mut regs: user_pt_regs = unsafe { mem::zeroed() };
-    
+
     let iov = libc::iovec {
         iov_base: &mut regs as *mut _ as *mut libc::c_void,
         iov_len: mem::size_of::<user_pt_regs>(),

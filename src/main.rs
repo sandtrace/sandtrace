@@ -43,22 +43,18 @@ fn main() -> anyhow::Result<()> {
             run_sandbox(args)?;
         }
         Commands::Watch(args) => {
-            let rt = tokio::runtime::Runtime::new()
-                .context("Failed to create async runtime")?;
+            let rt = tokio::runtime::Runtime::new().context("Failed to create async runtime")?;
             rt.block_on(watch::run_watch(args))
                 .context("Watch mode failed")?;
         }
         Commands::Audit(args) => {
-            audit::run_audit(args)
-                .context("Audit failed")?;
+            audit::run_audit(args).context("Audit failed")?;
         }
         Commands::Init(args) => {
-            init::run_init(args.force)
-                .context("Init failed")?;
+            init::run_init(args.force).context("Init failed")?;
         }
         Commands::Scan(args) => {
-            scan::run_scan(args)
-                .context("Scan failed")?;
+            scan::run_scan(args).context("Scan failed")?;
         }
     }
 
@@ -88,8 +84,7 @@ fn run_sandbox(args: cli::RunArgs) -> anyhow::Result<()> {
     let output = OutputManager::new(jsonl_file, args.verbose, args.no_color);
 
     // Create and run tracer
-    let mut tracer = Tracer::new(&args, output, shutdown)
-        .context("Failed to initialize tracer")?;
+    let mut tracer = Tracer::new(&args, output, shutdown).context("Failed to initialize tracer")?;
 
     let exit_code = tracer.run().context("Tracing failed")?;
 

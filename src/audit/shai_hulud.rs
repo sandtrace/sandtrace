@@ -7,24 +7,43 @@ use std::path::Path;
 /// These are patterns that would be unusual to find *only* in the hidden tail of a line.
 const SUSPICIOUS_PATTERNS: &[&str] = &[
     // Code execution / injection
-    "eval(", "exec(", "system(", "passthru(", "shell_exec(",
-    "atob(", "btoa(", "base64_decode(", "base64_encode(",
-    "document.write(", "innerhtml", "outerhtml",
+    "eval(",
+    "exec(",
+    "system(",
+    "passthru(",
+    "shell_exec(",
+    "atob(",
+    "btoa(",
+    "base64_decode(",
+    "base64_encode(",
+    "document.write(",
+    "innerhtml",
+    "outerhtml",
     "importscripts(",
     // Shell commands
-    "curl ", "wget ", "nc ", "bash ", "/bin/sh", "/bin/bash",
-    "powershell", "cmd.exe",
+    "curl ",
+    "wget ",
+    "nc ",
+    "bash ",
+    "/bin/sh",
+    "/bin/bash",
+    "powershell",
+    "cmd.exe",
     // XSS / injection
-    "<script", "javascript:", "onerror=", "onload=",
+    "<script",
+    "javascript:",
+    "onerror=",
+    "onload=",
     // Hex/unicode escapes (obfuscation)
-    "\\x", "\\u00",
+    "\\x",
+    "\\u00",
 ];
 
 /// File extensions where long lines are expected and hidden-content checks produce false positives.
 const NON_EXECUTABLE_EXTENSIONS: &[&str] = &[
     "md", "markdown", "txt", "rst", "adoc", "csv", "tsv", "log", "json", "yaml", "yml", "toml",
-    "xml", "html", "htm", "svg", "lock", "sum", "mod", "snap", "png", "jpg", "jpeg", "gif",
-    "ico", "woff", "woff2", "ttf", "eot", "map", "min.js", "min.css",
+    "xml", "html", "htm", "svg", "lock", "sum", "mod", "snap", "png", "jpg", "jpeg", "gif", "ico",
+    "woff", "woff2", "ttf", "eot", "map", "min.js", "min.css",
 ];
 
 fn is_non_executable(path: &Path) -> bool {
@@ -44,7 +63,10 @@ fn is_minified(lines: &[&str]) -> bool {
     lines.iter().any(|line| line.len() > 5000)
 }
 
-pub fn scan_file(path: &Path, shai_config: &ShaiHuludConfig) -> Result<Vec<AuditFinding>, std::io::Error> {
+pub fn scan_file(
+    path: &Path,
+    shai_config: &ShaiHuludConfig,
+) -> Result<Vec<AuditFinding>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     let file_path_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
@@ -157,8 +179,15 @@ fn check_invisible_chars(
                         // Find by byte index
                         line.as_bytes().get(idx) == s.as_bytes().first()
                     });
-                    let prev_is_ascii = idx > 0 && line[..idx].chars().next_back().map_or(false, |c| c.is_ascii());
-                    let next_is_ascii = line[idx + ch.len_utf8()..].chars().next().map_or(false, |c| c.is_ascii());
+                    let prev_is_ascii = idx > 0
+                        && line[..idx]
+                            .chars()
+                            .next_back()
+                            .map_or(false, |c| c.is_ascii());
+                    let next_is_ascii = line[idx + ch.len_utf8()..]
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii());
                     if prev_is_ascii && next_is_ascii {
                         Some("ZERO WIDTH JOINER")
                     } else {
@@ -212,13 +241,14 @@ fn check_base64_content(
 ) {
     // Only flag base64 in source files (not JSON, YAML configs where it's expected)
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if matches!(ext, "json" | "yaml" | "yml" | "toml" | "xml" | "pem" | "crt" | "key") {
+    if matches!(
+        ext,
+        "json" | "yaml" | "yml" | "toml" | "xml" | "pem" | "crt" | "key"
+    ) {
         return;
     }
 
-    let base64_regex = regex::Regex::new(
-        r"(?m)^[A-Za-z0-9+/]{100,}={0,2}$"
-    ).unwrap();
+    let base64_regex = regex::Regex::new(r"(?m)^[A-Za-z0-9+/]{100,}={0,2}$").unwrap();
 
     for mat in base64_regex.find_iter(content) {
         let line_number = content[..mat.start()].lines().count();
@@ -249,8 +279,8 @@ fn check_homoglyphs(
 ) {
     // Common homoglyph pairs: Cyrillic/Latin lookalikes
     let homoglyph_ranges = [
-        ('\u{0410}', '\u{044F}', "Cyrillic"),  // А-я (looks like A-a)
-        ('\u{0391}', '\u{03C9}', "Greek"),      // Α-ω
+        ('\u{0410}', '\u{044F}', "Cyrillic"), // А-я (looks like A-a)
+        ('\u{0391}', '\u{03C9}', "Greek"),    // Α-ω
     ];
 
     for (i, line) in lines.iter().enumerate() {
@@ -305,7 +335,9 @@ mod tests {
 
         let findings = scan_file(&file_path, &test_shai_config()).unwrap();
         assert!(!findings.is_empty());
-        assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
     }
 
     #[test]
@@ -338,7 +370,9 @@ mod tests {
 
         // Default config: should NOT flag (15 < 20)
         let findings = scan_file(&file_path, &test_shai_config()).unwrap();
-        assert!(!findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
 
         // Custom config with lower threshold: SHOULD flag (15 > 10)
         let custom = ShaiHuludConfig {
@@ -346,7 +380,9 @@ mod tests {
             steganographic_column: 200,
         };
         let findings = scan_file(&file_path, &custom).unwrap();
-        assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "shai-hulud-trailing-whitespace"));
     }
 
     #[test]
@@ -358,7 +394,9 @@ mod tests {
         write!(file, "const my\u{200B}Var = 'hello';").unwrap();
 
         let findings = scan_file(&file_path, &test_shai_config()).unwrap();
-        assert!(findings.iter().any(|f| f.rule_id == "shai-hulud-invisible-chars"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "shai-hulud-invisible-chars"));
     }
 
     #[test]

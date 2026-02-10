@@ -32,10 +32,7 @@ pub fn run_init(force: bool) -> anyhow::Result<()> {
     let rules_dir = sandtrace_dir.join("rules");
     let config_path = config::config_path();
 
-    eprintln!(
-        "{}",
-        "Initializing SandTrace configuration...".bold()
-    );
+    eprintln!("{}", "Initializing SandTrace configuration...".bold());
 
     // Create directories
     create_dir_if_needed(&sandtrace_dir)?;
@@ -76,9 +73,17 @@ fn create_dir_if_needed(path: &Path) -> anyhow::Result<()> {
 
 fn write_file_if_needed(path: &Path, content: &str, force: bool) -> anyhow::Result<()> {
     if path.exists() && !force {
-        eprintln!("  {} {} (use --force to overwrite)", "skipped".yellow(), path.display());
+        eprintln!(
+            "  {} {} (use --force to overwrite)",
+            "skipped".yellow(),
+            path.display()
+        );
     } else {
-        let label = if path.exists() { "overwrote" } else { "created" };
+        let label = if path.exists() {
+            "overwrote"
+        } else {
+            "created"
+        };
         std::fs::write(path, content)?;
         eprintln!("  {} {}", label.green(), path.display());
     }

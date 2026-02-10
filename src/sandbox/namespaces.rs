@@ -12,15 +12,21 @@ pub fn setup_user_namespace() -> Result<()> {
     let uid = Uid::current();
     let uid_map = format!("0 {} 1\n", uid);
     if let Err(e) = fs::write("/proc/self/uid_map", uid_map) {
-        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(e.raw_os_error().unwrap_or(1))).into());
+        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(
+            e.raw_os_error().unwrap_or(1),
+        ))
+        .into());
     }
 
     // Set up gid_map - need to disable setgroups first for unprivileged user
     let _ = fs::write("/proc/self/setgroups", "deny");
-    
+
     let gid_map = format!("0 {} 1\n", uid);
     if let Err(e) = fs::write("/proc/self/gid_map", gid_map) {
-        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(e.raw_os_error().unwrap_or(1))).into());
+        return Err(SandboxError::NamespaceCreation(nix::Error::from_raw(
+            e.raw_os_error().unwrap_or(1),
+        ))
+        .into());
     }
 
     Ok(())

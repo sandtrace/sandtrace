@@ -7,6 +7,8 @@ use crate::error::SandtraceError;
 use crate::event::{AuditFinding, Severity};
 use crate::rules::RuleRegistry;
 use colored::Colorize;
+use ignore::WalkBuilder;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
 pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
@@ -45,22 +47,28 @@ pub fn run_audit_with_config(args: AuditArgs, config: &SandtraceConfig) -> Resul
     let files = collect_files(&args.target);
     eprintln!("Found {} files to scan", files.len());
 
-    // Run all scanners
-    let mut findings: Vec<AuditFinding> = Vec::new();
+    // Run all scanners in parallel
+    let shai_hulud_config = &config.shai_hulud;
+    let mut findings: Vec<AuditFinding> = files
+        .par_iter()
+        .flat_map(|file_path| {
+            let mut file_findings = Vec::new();
 
-    for file_path in &files {
-        // Shai-Hulud whitespace/obfuscation scanner
-        match shai_hulud::scan_file(file_path, &config.shai_hulud) {
-            Ok(mut file_findings) => findings.append(&mut file_findings),
-            Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
-        }
+            // Shai-Hulud whitespace/obfuscation scanner
+            match shai_hulud::scan_file(file_path, shai_hulud_config) {
+                Ok(f) => file_findings.extend(f),
+                Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
+            }
 
-        // Content scanner (credential patterns + custom patterns)
-        match scanner::scan_file_content(file_path, config) {
-            Ok(mut file_findings) => findings.append(&mut file_findings),
-            Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
-        }
-    }
+            // Content scanner (credential patterns + custom patterns)
+            match scanner::scan_file_content(file_path, config) {
+                Ok(f) => file_findings.extend(f),
+                Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
+            }
+
+            file_findings
+        })
+        .collect();
 
     // Supply-chain scanner
     let mut supply_findings = scanner::scan_supply_chain(&args.target);
@@ -99,47 +107,31 @@ pub fn run_audit_with_config(args: AuditArgs, config: &SandtraceConfig) -> Resul
 }
 
 fn collect_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    collect_files_recursive(dir, &mut files, 0);
-    files
-}
-
-fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 20 {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Skip hidden directories, node_modules, .git, target
-        if name_str.starts_with('.') && path.is_dir() {
-            continue;
-        }
-        if matches!(
-            name_str.as_ref(),
-            "node_modules" | "target" | "vendor" | ".git" | "__pycache__" | "dist" | "build"
-                | "playwright-report" | "test-results" | "coverage"
-        ) {
-            continue;
-        }
-
-        if path.is_dir() {
-            collect_files_recursive(&path, files, depth + 1);
-        } else if path.is_file() {
-            // Only scan text-like files (skip binaries by extension)
-            if is_scannable(&path) {
-                files.push(path);
+    WalkBuilder::new(dir)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .max_depth(Some(20))
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            // Skip hidden directories (but allow hidden files)
+            if name.starts_with('.') && entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                return false;
             }
-        }
-    }
+            !matches!(
+                name.as_ref(),
+                "node_modules" | "target" | "vendor" | ".git" | "__pycache__"
+                    | "dist" | "build" | ".pnpm" | ".venv" | "venv" | ".tox"
+                    | "playwright-report" | "test-results" | "coverage" | ".cache"
+            )
+        })
+        .build()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+        .map(|e| e.into_path())
+        .filter(|p| is_scannable(p))
+        .collect()
 }
 
 fn is_scannable(path: &Path) -> bool {

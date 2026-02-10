@@ -23,6 +23,9 @@ pub enum Commands {
 
     /// Initialize ~/.sandtrace/ with default config and rules
     Init(InitArgs),
+
+    /// Scan filesystem for whitespace obfuscation (wormsign detection)
+    Scan(ScanArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -135,6 +138,33 @@ pub struct InitArgs {
     /// Overwrite existing config and rules
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ScanArgs {
+    /// Directory to scan (defaults to $HOME)
+    #[arg(default_value_t = default_scan_target())]
+    pub target: String,
+
+    /// Minimum consecutive whitespace characters to flag
+    #[arg(short = 'n', long, default_value_t = 50)]
+    pub min_whitespace: usize,
+
+    /// Show line preview for each finding
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Maximum file size in bytes to scan (skip larger files)
+    #[arg(long, default_value_t = 10_000_000)]
+    pub max_size: u64,
+
+    /// Disable colored terminal output
+    #[arg(long)]
+    pub no_color: bool,
+}
+
+fn default_scan_target() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| ".".into())
 }
 
 #[derive(Debug, Clone, ValueEnum)]

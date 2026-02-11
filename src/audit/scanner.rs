@@ -169,18 +169,108 @@ pub fn scan_file_content(
         })
         .collect();
 
+    // Separate custom patterns by match type
+    let mut custom_literal_patterns = Vec::new();
+    let mut custom_filename_patterns = Vec::new();
+
     for custom in &config.custom_patterns {
         let severity = parse_severity(&custom.severity);
-        all_patterns.push(ScanPattern {
-            rule_id: custom.id.clone(),
-            description: custom.description.clone(),
-            severity,
-            pattern: custom.pattern.clone(),
-        });
+
+        // Check file_extensions filter
+        if !custom.file_extensions.is_empty() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !custom
+                .file_extensions
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(ext))
+            {
+                continue;
+            }
+        }
+
+        match custom.match_type.as_str() {
+            "literal" => {
+                custom_literal_patterns.push((custom, severity));
+            }
+            "filename" => {
+                custom_filename_patterns.push((custom, severity));
+            }
+            _ => {
+                // Default: regex
+                all_patterns.push(ScanPattern {
+                    rule_id: custom.id.clone(),
+                    description: custom.description.clone(),
+                    severity,
+                    pattern: custom.pattern.clone(),
+                });
+            }
+        }
+    }
+
+    // Handle filename match patterns (match against path, not content)
+    for (custom, severity) in &custom_filename_patterns {
+        let file_path_lower = file_path_str.to_lowercase();
+        let pattern_lower = custom.pattern.to_lowercase();
+        if file_path_lower.contains(&pattern_lower) {
+            findings.push(AuditFinding {
+                file_path: file_path_str.clone(),
+                line_number: None,
+                rule_id: custom.id.clone(),
+                severity: *severity,
+                description: custom.description.clone(),
+                matched_pattern: custom.pattern.clone(),
+                context_lines: vec![format!("filename match: {}", file_path_str)],
+            });
+        }
+    }
+
+    // Handle literal match patterns (case-insensitive exact string search in content)
+    let content_lower = content.to_lowercase();
+    for (custom, severity) in &custom_literal_patterns {
+        let pattern_lower = custom.pattern.to_lowercase();
+        let mut search_start = 0;
+        while let Some(pos) = content_lower[search_start..].find(&pattern_lower) {
+            let abs_pos = search_start + pos;
+            let line_number = content[..abs_pos].lines().count();
+
+            // Check redaction markers
+            let check_lines: Vec<&str> = content
+                .lines()
+                .skip(line_number.saturating_sub(2))
+                .take(3)
+                .collect();
+            let context_text = check_lines.join(" ").to_lowercase();
+            if config
+                .redaction_markers
+                .iter()
+                .any(|m| context_text.contains(m))
+            {
+                search_start = abs_pos + pattern_lower.len();
+                continue;
+            }
+
+            let lines: Vec<&str> = content.lines().collect();
+            let start = line_number.saturating_sub(2);
+            let end = (line_number + 1).min(lines.len());
+            let context: Vec<String> = lines[start..end].iter().map(|l| l.to_string()).collect();
+
+            findings.push(AuditFinding {
+                file_path: file_path_str.clone(),
+                line_number: Some(line_number),
+                rule_id: custom.id.clone(),
+                severity: *severity,
+                description: custom.description.clone(),
+                matched_pattern: custom.pattern.clone(),
+                context_lines: context,
+            });
+
+            search_start = abs_pos + pattern_lower.len();
+        }
     }
 
     let redaction_markers = &config.redaction_markers;
 
+    // Handle regex patterns (built-in + custom regex)
     for pattern_def in &all_patterns {
         let regex = match Regex::new(&pattern_def.pattern) {
             Ok(r) => r,
@@ -389,6 +479,9 @@ mod tests {
             description: "Internal API key found".to_string(),
             severity: "high".to_string(),
             pattern: "INTERNAL_[A-Z0-9]{32}".to_string(),
+            match_type: "regex".to_string(),
+            file_extensions: Vec::new(),
+            tags: Vec::new(),
         });
 
         let findings = scan_file_content(&file_path, &config).unwrap();
@@ -430,5 +523,94 @@ mod tests {
         let findings = check_package_json_scripts(dir.path());
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "supply-chain-suspicious-script");
+    }
+
+    #[test]
+    fn test_literal_match_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("app.rs");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "let domain = \"malware-c2.evil.com\";").unwrap();
+
+        let mut config = test_config();
+        config.custom_patterns.push(CustomPattern {
+            id: "ioc-c2-domain".to_string(),
+            description: "Known C2 domain".to_string(),
+            severity: "critical".to_string(),
+            pattern: "malware-c2.evil.com".to_string(),
+            match_type: "literal".to_string(),
+            file_extensions: Vec::new(),
+            tags: vec!["ioc".to_string(), "c2".to_string()],
+        });
+
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "ioc-c2-domain"));
+    }
+
+    #[test]
+    fn test_literal_match_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("app.rs");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "let hash = \"ABCDEF1234567890\";").unwrap();
+
+        let mut config = test_config();
+        config.custom_patterns.push(CustomPattern {
+            id: "ioc-hash".to_string(),
+            description: "Known hash".to_string(),
+            severity: "critical".to_string(),
+            pattern: "abcdef1234567890".to_string(),
+            match_type: "literal".to_string(),
+            file_extensions: Vec::new(),
+            tags: vec!["ioc".to_string()],
+        });
+
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "ioc-hash"));
+    }
+
+    #[test]
+    fn test_filename_match_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("mimikatz.ps1");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "Write-Host 'hello'").unwrap();
+
+        let mut config = test_config();
+        config.custom_patterns.push(CustomPattern {
+            id: "ioc-suspicious-file".to_string(),
+            description: "Known malicious filename".to_string(),
+            severity: "high".to_string(),
+            pattern: "mimikatz".to_string(),
+            match_type: "filename".to_string(),
+            file_extensions: vec!["ps1".to_string()],
+            tags: vec!["ioc".to_string(), "tool".to_string()],
+        });
+
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "ioc-suspicious-file"));
+    }
+
+    #[test]
+    fn test_file_extensions_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("app.txt");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "malware-c2.evil.com").unwrap();
+
+        let mut config = test_config();
+        config.custom_patterns.push(CustomPattern {
+            id: "ioc-c2-domain".to_string(),
+            description: "Known C2 domain".to_string(),
+            severity: "critical".to_string(),
+            pattern: "malware-c2.evil.com".to_string(),
+            match_type: "literal".to_string(),
+            file_extensions: vec!["rs".to_string(), "js".to_string()],
+            tags: vec!["ioc".to_string()],
+        });
+
+        // .txt file should be skipped because file_extensions only includes rs and js
+        let findings = scan_file_content(&file_path, &config).unwrap();
+        assert!(!findings.iter().any(|f| f.rule_id == "ioc-c2-domain"));
     }
 }

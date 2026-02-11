@@ -31,7 +31,7 @@ sandtrace/
 │   ├── audit/
 │   │   ├── mod.rs                # Audit orchestrator (parallel via rayon)
 │   │   ├── scanner.rs            # Credential + supply-chain patterns
-│   │   └── shai_hulud.rs         # Steganography + obfuscation detection
+│   │   └── obfuscation.rs        # Steganography + obfuscation detection
 │   ├── watch/
 │   │   ├── mod.rs                # Watch orchestrator (tokio async)
 │   │   ├── monitor.rs            # inotify file monitoring
@@ -83,7 +83,7 @@ Loads and validates `~/.sandtrace/config.toml`. Provides defaults for all option
 
 ### Audit (`audit/`)
 
-Parallel codebase scanner using `rayon`. The `scanner.rs` module handles credential and supply-chain pattern matching via regex. The `shai_hulud.rs` module handles whitespace obfuscation, zero-width unicode, and homoglyph detection.
+Parallel codebase scanner using `rayon`. The `scanner.rs` module handles credential and supply-chain pattern matching via regex. The `obfuscation.rs` module handles whitespace obfuscation, zero-width unicode, and homoglyph detection.
 
 ### Scan (`scan.rs`)
 

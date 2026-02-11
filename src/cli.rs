@@ -156,6 +156,10 @@ pub struct ScanArgs {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Only print filenames with matches (like ripgrep -l)
+    #[arg(short = 'l', long = "files-with-matches")]
+    pub files_only: bool,
+
     /// Maximum file size in bytes to scan (skip larger files)
     #[arg(long, default_value_t = 10_000_000)]
     pub max_size: u64,

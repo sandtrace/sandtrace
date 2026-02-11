@@ -25,6 +25,10 @@ A Rust security tool for Linux that combines malware sandboxing, credential file
 ### Install
 
 ```bash
+# If you don't have Rust/Cargo installed:
+sudo apt install cargo rustup && rustup update stable
+
+# Build and install
 cargo build --release
 cp target/release/sandtrace ~/.cargo/bin/
 ```
@@ -56,9 +60,14 @@ sandtrace run --allow-path ./project --output trace.jsonl npm install
 
 ## Detection
 
-- **27+ built-in rules** — AWS keys, GitHub PATs, Stripe keys, JWTs, private keys, and more
-- **Shai-Hulud detection** — trailing whitespace, hidden content past column 200, zero-width unicode, homoglyphs
+- **50+ built-in rules** — AWS keys, GitHub PATs, Stripe keys, JWTs, private keys, and more
+- **30 obfuscation rules** across 3 tiers:
+  - **Tier 1 — Encoding** — hex/unicode escapes, string concatenation, charcode construction, constructor chains, git hook injection, PHP variable functions
+  - **Tier 2 — Advanced** — nested atob(), polyglot files, symlink attacks, filename homoglyphs, ROT13, template literals, PHP backtick/create_function, Python dangerous imports
+  - **Tier 3 — Supply chain** — typosquatting, dependency confusion, install script chains, preg_replace /e, suspicious dotfiles, Proxy/Reflect, JSON eval, encoded shell commands
 - **Supply-chain scanning** — suspicious postinstall scripts, unexpected dependency directory writes
+- **IOC support** — add custom indicators of compromise (domains, hashes, IPs, filenames) as detection rules
+- **npm malware feed** — auto-generate patterns from the OpenSSF [malicious-packages](https://github.com/ossf/malicious-packages) OSV dataset via `scripts/update-npm-iocs.sh`
 - **19 watch rules** — real-time monitoring of credential files across 14 services
 
 ## Documentation

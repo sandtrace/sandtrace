@@ -1,5 +1,5 @@
+pub mod obfuscation;
 pub mod scanner;
-pub mod shai_hulud;
 
 use crate::cli::AuditArgs;
 use crate::config::{self, SandtraceConfig};
@@ -52,14 +52,14 @@ pub fn run_audit_with_config(
     eprintln!("Found {} files to scan", files.len());
 
     // Run all scanners in parallel
-    let shai_hulud_config = &config.shai_hulud;
+    let obfuscation_config = &config.obfuscation;
     let mut findings: Vec<AuditFinding> = files
         .par_iter()
         .flat_map(|file_path| {
             let mut file_findings = Vec::new();
 
-            // Shai-Hulud whitespace/obfuscation scanner
-            match shai_hulud::scan_file(file_path, shai_hulud_config) {
+            // Obfuscation scanner
+            match obfuscation::scan_file(file_path, obfuscation_config) {
                 Ok(f) => file_findings.extend(f),
                 Err(e) => log::debug!("Skipping {}: {}", file_path.display(), e),
             }
@@ -74,9 +74,26 @@ pub fn run_audit_with_config(
         })
         .collect();
 
-    // Supply-chain scanner
+    // Supply-chain scanner (existing)
     let mut supply_findings = scanner::scan_supply_chain(&args.target);
     findings.append(&mut supply_findings);
+
+    // Git hook scan (Rule 7) — separate pass since .git/ is skipped by file collector
+    let mut git_hook_findings = obfuscation::encoding::scan_git_hooks(&args.target);
+    findings.append(&mut git_hook_findings);
+
+    // Supply chain manifest scans (Rules 18-20)
+    let mut typosquat_findings =
+        obfuscation::supply_chain::check_typosquat(&args.target, obfuscation_config);
+    findings.append(&mut typosquat_findings);
+
+    let mut dep_confusion_findings =
+        obfuscation::supply_chain::check_dependency_confusion(&args.target, obfuscation_config);
+    findings.append(&mut dep_confusion_findings);
+
+    let mut install_script_findings =
+        obfuscation::supply_chain::check_install_scripts(&args.target);
+    findings.append(&mut install_script_findings);
 
     // Filter by severity
     findings.retain(|f| f.severity >= min_severity);
@@ -146,6 +163,9 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
                     | "test-results"
                     | "coverage"
                     | ".cache"
+                    | "logs"
+                    | "storage"
+                    | "public"
             )
         })
         .build()
@@ -193,7 +213,6 @@ fn is_scannable(path: &Path) -> bool {
             | "env"
             | "env.local"
             | "env.production"
-            | "md"
             | "txt"
             | "csv"
             | "html"

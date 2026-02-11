@@ -67,4 +67,4 @@ Override the default rules directory. See [Custom Rules](../rules/custom-rules.m
 
 ## Built-in detection rules
 
-See [Detection Rules](../rules/detection-rules.md) for the full list of 27+ built-in patterns that `sandtrace audit` checks.
+See [Detection Rules](../rules/detection-rules.md) for the full list of 50+ built-in patterns that `sandtrace audit` checks, including 30 obfuscation rules across 3 tiers.

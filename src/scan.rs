@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -12,6 +13,40 @@ use rayon::prelude::*;
 use regex::Regex;
 
 use crate::cli::ScanArgs;
+
+/// File extensions to skip — data/db formats where long whitespace is normal noise
+const SKIP_EXTENSIONS: &[&str] = &[
+    // Data / database
+    "jsonl", "ndjson", "json", "bson", "csv", "tsv", "parquet", "avro",
+    // Logs / session dumps
+    "log",
+    // Database files
+    "sqlite", "sqlite3", "db", "mdb", "ldb",
+    // Binary / compiled
+    "wasm", "pyc", "pyo", "class", "o", "a", "so", "dylib", "dll", "exe",
+    // Archives
+    "zip", "tar", "gz", "bz2", "xz", "zst", "7z", "rar",
+    // Images / media
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp",
+    "mp3", "mp4", "wav", "ogg", "webm", "avi", "mov", "flv",
+    // Fonts
+    "woff", "woff2", "ttf", "otf", "eot",
+    // Lock files
+    "lock",
+    // PDF / docs / markdown
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "md",
+    // Maps / minified bundles (often single huge lines)
+    "map",
+];
+
+fn should_skip_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| {
+            let lower = ext.to_ascii_lowercase();
+            SKIP_EXTENSIONS.contains(&lower.as_str())
+        })
+}
 
 struct Finding {
     path: PathBuf,
@@ -110,6 +145,7 @@ pub fn run_scan(args: ScanArgs) -> Result<()> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
         .map(|e| e.into_path())
+        .filter(|p| !should_skip_extension(p))
         .collect();
 
     eprintln!("Found {} files to scan", paths.len());
@@ -135,39 +171,47 @@ pub fn run_scan(args: ScanArgs) -> Result<()> {
     } else {
         let unique_files: HashSet<&PathBuf> = all_findings.iter().map(|f| &f.path).collect();
 
-        println!();
-        if use_color {
-            println!(
-                "{} {} file(s) with {}+ consecutive whitespace chars:",
-                "WORMSIGN DETECTED:".red().bold(),
-                unique_files.len(),
-                ws_min
-            );
-        } else {
-            println!(
-                "WORMSIGN DETECTED: {} file(s) with {}+ consecutive whitespace chars:",
-                unique_files.len(),
-                ws_min
-            );
-        }
-        println!();
-
-        let mut current_file: Option<&PathBuf> = None;
-        for finding in &all_findings {
-            if current_file != Some(&finding.path) {
-                if use_color {
-                    println!("  {}", finding.path.display().to_string().yellow());
-                } else {
-                    println!("  {}", finding.path.display());
-                }
-                current_file = Some(&finding.path);
+        if args.files_only {
+            let mut sorted: Vec<&&PathBuf> = unique_files.iter().collect();
+            sorted.sort();
+            for path in sorted {
+                println!("{}", path.display());
             }
-            println!(
-                "    Line {}: {} whitespace chars",
-                finding.line_num, finding.ws_count
-            );
-            if args.verbose {
-                println!("      {}", finding.line_preview);
+        } else {
+            println!();
+            if use_color {
+                println!(
+                    "{} {} file(s) with {}+ consecutive whitespace chars:",
+                    "WORMSIGN DETECTED:".red().bold(),
+                    unique_files.len(),
+                    ws_min
+                );
+            } else {
+                println!(
+                    "WORMSIGN DETECTED: {} file(s) with {}+ consecutive whitespace chars:",
+                    unique_files.len(),
+                    ws_min
+                );
+            }
+            println!();
+
+            let mut current_file: Option<&PathBuf> = None;
+            for finding in &all_findings {
+                if current_file != Some(&finding.path) {
+                    if use_color {
+                        println!("  {}", finding.path.display().to_string().yellow());
+                    } else {
+                        println!("  {}", finding.path.display());
+                    }
+                    current_file = Some(&finding.path);
+                }
+                println!(
+                    "    Line {}: {} whitespace chars",
+                    finding.line_num, finding.ws_count
+                );
+                if args.verbose {
+                    println!("      {}", finding.line_preview);
+                }
             }
         }
     }

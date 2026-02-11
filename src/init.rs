@@ -55,7 +55,7 @@ pub fn run_init(force: bool) -> anyhow::Result<()> {
     eprintln!("Edit {} to customize:", config_path.display());
     eprintln!("  - Redaction markers (reduce false positives)");
     eprintln!("  - Custom credential patterns");
-    eprintln!("  - Shai-Hulud thresholds");
+    eprintln!("  - Obfuscation scanner thresholds");
     eprintln!("  - Additional rule directories");
 
     Ok(())

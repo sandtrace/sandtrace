@@ -26,8 +26,8 @@ The global configuration file. Controls:
 
 - Rules directory paths
 - Default alert channels for watch mode
-- Shai-Hulud scanner thresholds
-- Custom credential patterns
+- Obfuscation scanner thresholds
+- Custom credential and IOC patterns
 - Redaction markers for false positive suppression
 
 See [Configuration](../configuration.md) for the full reference.

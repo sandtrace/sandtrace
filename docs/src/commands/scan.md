@@ -1,6 +1,6 @@
 # sandtrace scan
 
-Fast parallel filesystem sweep using rayon thread pool and ignore-aware directory walking. Detects the signature technique of the Shai-Hulud supply-chain attack campaign.
+Fast parallel filesystem sweep using rayon thread pool and ignore-aware directory walking. Detects whitespace obfuscation techniques used in supply-chain attacks.
 
 ## Usage
 
@@ -30,7 +30,7 @@ The following directories are automatically skipped during scanning:
 
 ## How it works
 
-`sandtrace scan` uses rayon for parallel directory walking. Each file is checked line-by-line for runs of consecutive whitespace characters (spaces and tabs) that exceed the threshold. This is the signature technique used by the Shai-Hulud supply-chain attack campaign, where malicious payloads are hidden in whitespace at the end of source lines or past column 200.
+`sandtrace scan` uses rayon for parallel directory walking. Each file is checked line-by-line for runs of consecutive whitespace characters (spaces and tabs) that exceed the threshold. This detects whitespace obfuscation attacks where malicious payloads are hidden in whitespace at the end of source lines or past column 200.
 
 ## Examples
 

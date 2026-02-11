@@ -19,7 +19,7 @@
 - **Audit your codebase** before every commit or CI run — catch hardcoded AWS keys, Stripe tokens, JWTs, and 27+ credential patterns before they ship.
 - **Sandbox untrusted installs** — run `npm install` or `pip install` inside an 8-layer isolation envelope and get a full JSONL syscall trace of what it tried to do.
 - **Monitor credential files** — get real-time alerts when an unexpected process touches `~/.aws/credentials`, `~/.ssh/id_rsa`, or any of 14 monitored credential locations.
-- **Detect Shai-Hulud attacks** — scan for the whitespace obfuscation technique used in supply-chain attacks: trailing spaces, content hidden past column 200, zero-width unicode, and homoglyph substitution.
+- **Detect obfuscation attacks** — scan for whitespace obfuscation techniques used in supply-chain attacks: trailing spaces, content hidden past column 200, zero-width unicode, and homoglyph substitution.
 - **CI/CD gating** — output SARIF for GitHub Code Scanning or JSON for custom pipelines, with exit codes that fail the build on high/critical findings.
 
 ## Philosophy

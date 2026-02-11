@@ -43,16 +43,22 @@ redaction_markers = [
   "'.$", "\".$", "' .", "\" .",
 ]
 
-# Shai-Hulud obfuscation scanner settings
-[shai_hulud]
+# Obfuscation scanner settings
+[obfuscation]
 # Flag lines with more than this many trailing spaces
 max_trailing_spaces = 20
 # Flag suspicious content hidden past this column
 steganographic_column = 200
 
-# Custom credential patterns for audit scanning.
-# Each [[custom_patterns]] block adds a regex matched against file contents.
-# These are appended to the built-in credential patterns.
+# Additional pattern files (merged with custom_patterns below)
+# Patterns from these files are appended to custom_patterns at load time.
+# pattern_files = ["~/.sandtrace/npm-malware.toml"]
+
+# Custom patterns for audit scanning.
+# Supports three match types:
+#   "regex"    — pattern is a regular expression (default)
+#   "literal"  — pattern is an exact string match (case-insensitive)
+#   "filename" — pattern matches against file names/paths
 #
 # [[custom_patterns]]
 # id = "cred-internal-api"
@@ -60,8 +66,30 @@ steganographic_column = 200
 # severity = "high"
 # pattern = 'INTERNAL_[A-Z0-9]{32}'
 #
+# # IOC example: known malicious domain
 # [[custom_patterns]]
-# id = "cred-company-token"
-# description = "Company-specific token format"
+# id = "ioc-c2-domain"
+# description = "Known C2 domain found in source"
 # severity = "critical"
-# pattern = 'ACME_[a-zA-Z0-9]{40}'
+# match_type = "literal"
+# pattern = "malware-c2.example.com"
+# tags = ["ioc", "c2"]
+#
+# # IOC example: malicious file hash
+# [[custom_patterns]]
+# id = "ioc-malware-hash"
+# description = "Known malware SHA256 hash"
+# severity = "critical"
+# match_type = "literal"
+# pattern = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+# tags = ["ioc", "malware"]
+#
+# # IOC example: suspicious filename
+# [[custom_patterns]]
+# id = "ioc-suspicious-file"
+# description = "Known malicious filename pattern"
+# severity = "high"
+# match_type = "filename"
+# pattern = "mimikatz"
+# file_extensions = ["exe", "dll", "ps1"]
+# tags = ["ioc", "tool"]

@@ -134,13 +134,24 @@ pub fn run_audit_with_config(
 }
 
 fn collect_files(dir: &Path) -> Vec<PathBuf> {
-    WalkBuilder::new(dir)
+    let mut builder = WalkBuilder::new(dir);
+    builder
         .hidden(false)
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
-        .max_depth(Some(20))
-        .filter_entry(|entry| {
+        .max_depth(Some(20));
+
+    // Load .sandtraceignore files (gitignore format)
+    // Global: ~/.sandtrace/.sandtraceignore
+    let global_ignore = crate::config::global_ignore_path();
+    if global_ignore.exists() {
+        let _ = builder.add_ignore(&global_ignore);
+    }
+    // Per-directory: auto-discover .sandtraceignore in any traversed directory
+    builder.add_custom_ignore_filename(".sandtraceignore");
+
+    builder.filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
             // Skip hidden directories (but allow hidden files)
             if name.starts_with('.') && entry.file_type().is_some_and(|ft| ft.is_dir()) {

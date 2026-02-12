@@ -118,12 +118,23 @@ pub fn run_scan(args: ScanArgs) -> Result<()> {
     let files_scanned = AtomicUsize::new(0);
 
     // Collect file paths — scan everything, skip known junk directories
-    let paths: Vec<PathBuf> = WalkBuilder::new(&args.target)
+    let mut builder = WalkBuilder::new(&args.target);
+    builder
         .hidden(false)
         .git_ignore(false)
         .git_global(false)
-        .git_exclude(false)
-        .filter_entry(|entry| {
+        .git_exclude(false);
+
+    // Load .sandtraceignore files (gitignore format)
+    // Global: ~/.sandtrace/.sandtraceignore
+    let global_ignore = crate::config::global_ignore_path();
+    if global_ignore.exists() {
+        let _ = builder.add_ignore(&global_ignore);
+    }
+    // Per-directory: auto-discover .sandtraceignore in any traversed directory
+    builder.add_custom_ignore_filename(".sandtraceignore");
+
+    let paths: Vec<PathBuf> = builder.filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),

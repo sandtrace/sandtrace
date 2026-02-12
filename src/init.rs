@@ -2,6 +2,61 @@ use crate::config;
 use colored::Colorize;
 use std::path::Path;
 
+/// Default .sandtraceignore content (gitignore format)
+const DEFAULT_SANDTRACEIGNORE: &str = "\
+# SandTrace ignore file (gitignore format)
+# Paths listed here are skipped by audit and scan commands.
+# Supports globs, directory patterns, and negation (!)
+# Place in ~/.sandtrace/ for global ignores, or in any scanned directory for local ignores.
+#
+# NOTE: Patterns match directory/file names anywhere in the tree.
+
+# Claude Code internals
+file-history/
+
+# Package manager caches
+.npm/
+.yarn/
+.cargo/
+.cache/
+.bun/
+.local/
+.pnpm/
+
+# Python packages
+site-packages/
+
+# Build artifacts
+target/
+dist/
+build/
+node_modules/
+vendor/
+
+# Virtual environments
+.venv/
+venv/
+.tox/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Binary / compiled
+*.o
+*.so
+*.dylib
+*.exe
+*.dll
+*.wasm
+*.pyc
+
+# Other tool data
+opencode/
+";
+
 /// Built-in rule file contents, embedded at compile time
 const CREDENTIAL_ACCESS_RULES: &str = include_str!("../rules/credential-access.yml");
 const SUPPLY_CHAIN_RULES: &str = include_str!("../rules/supply-chain.yml");
@@ -41,6 +96,10 @@ pub fn run_init(force: bool) -> anyhow::Result<()> {
     // Write config.toml
     write_file_if_needed(&config_path, &config::default_config_toml(), force)?;
 
+    // Write default .sandtraceignore
+    let ignore_path = config::global_ignore_path();
+    write_file_if_needed(&ignore_path, DEFAULT_SANDTRACEIGNORE, force)?;
+
     // Copy built-in rule packs
     for rule_file in BUILTIN_RULE_FILES {
         let dest = rules_dir.join(rule_file.filename);
@@ -49,8 +108,9 @@ pub fn run_init(force: bool) -> anyhow::Result<()> {
 
     eprintln!();
     eprintln!("{}", "SandTrace initialized.".green().bold());
-    eprintln!("  Config: {}", config_path.display());
-    eprintln!("  Rules:  {}/", rules_dir.display());
+    eprintln!("  Config:  {}", config_path.display());
+    eprintln!("  Ignore:  {}", ignore_path.display());
+    eprintln!("  Rules:   {}/", rules_dir.display());
     eprintln!();
     eprintln!("Edit {} to customize:", config_path.display());
     eprintln!("  - Redaction markers (reduce false positives)");

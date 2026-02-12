@@ -7,14 +7,11 @@ use super::{is_language, rot13, DANGEROUS_FUNCS, HOMOGLYPH_RANGES};
 
 // --- Lazy-compiled regex patterns ---
 
-static RE_ATOB_NESTED: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"atob\s*\(\s*atob\s*\(").unwrap());
+static RE_ATOB_NESTED: Lazy<Regex> = Lazy::new(|| Regex::new(r"atob\s*\(\s*atob\s*\(").unwrap());
 
-static RE_ATOB_LONG: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"atob\s*\([^)]{20,}\)").unwrap());
+static RE_ATOB_LONG: Lazy<Regex> = Lazy::new(|| Regex::new(r"atob\s*\([^)]{20,}\)").unwrap());
 
-static RE_ROT13_PHP: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"str_rot13\s*\(").unwrap());
+static RE_ROT13_PHP: Lazy<Regex> = Lazy::new(|| Regex::new(r"str_rot13\s*\(").unwrap());
 
 static RE_ROT13_STRING_ARG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"str_rot13\s*\(\s*['"]([a-zA-Z]+)['"]\s*\)"#).unwrap());
@@ -25,20 +22,17 @@ static RE_TEMPLATE_LITERAL: Lazy<Regex> =
 static RE_PHP_CREATE_FUNCTION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"create_function\s*\(").unwrap());
 
-static RE_PHP_BACKTICK: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
+static RE_PHP_BACKTICK: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
 
 static RE_PYTHON_IMPORT_OS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"__import__\s*\(\s*['"]os['"]\s*\)"#).unwrap());
 
-static RE_PYTHON_PICKLE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"pickle\.loads\s*\(").unwrap());
+static RE_PYTHON_PICKLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"pickle\.loads\s*\(").unwrap());
 
 static RE_PYTHON_EXEC_COMPILE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"exec\s*\(\s*compile\s*\(").unwrap());
 
-static RE_PYTHON_MARSHAL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"marshal\.loads\s*\(").unwrap());
+static RE_PYTHON_MARSHAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"marshal\.loads\s*\(").unwrap());
 
 /// Magic byte signatures for polyglot detection (Rule 10).
 const MAGIC_BYTES: &[(&[u8], &str)] = &[
@@ -54,35 +48,88 @@ const MAGIC_BYTES: &[(&[u8], &str)] = &[
 
 /// Source file extensions where binary magic bytes are suspicious (polyglot check).
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "js", "ts", "jsx", "tsx", "mjs", "cjs", "py", "rb", "php", "go", "rs", "java", "kt",
-    "swift", "c", "cpp", "h", "sh", "bash", "pl", "pm", "css", "scss", "sql",
+    "js", "ts", "jsx", "tsx", "mjs", "cjs", "py", "rb", "php", "go", "rs", "java", "kt", "swift",
+    "c", "cpp", "h", "sh", "bash", "pl", "pm", "css", "scss", "sql",
 ];
 
 /// Known-good dotfiles that are not suspicious.
 const KNOWN_GOOD_DOTFILES: &[&str] = &[
-    ".gitignore", ".gitattributes", ".gitmodules", ".gitkeep",
-    ".editorconfig", ".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yml",
-    ".eslintignore", ".prettierrc", ".prettierrc.js", ".prettierrc.json", ".prettierignore",
-    ".stylelintrc", ".stylelintrc.json",
-    ".babelrc", ".babelrc.js", ".babelrc.json",
-    ".npmrc", ".npmignore", ".yarnrc", ".yarnrc.yml",
-    ".env", ".env.example", ".env.local", ".env.development", ".env.production", ".env.test",
-    ".dockerignore", ".htaccess",
-    ".flake8", ".pylintrc", ".pyproject.toml", ".python-version",
-    ".rubocop.yml", ".ruby-version", ".ruby-gemset",
-    ".php-cs-fixer.php", ".php-cs-fixer.dist.php", ".phpunit.xml", ".phpunit.result.cache",
-    ".travis.yml", ".circleci", ".github",
-    ".vscode", ".idea", ".DS_Store",
-    ".browserslistrc", ".nvmrc", ".node-version", ".tool-versions",
-    ".clang-format", ".clang-tidy", ".rustfmt.toml",
-    ".mailmap", ".gitmessage",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".gitkeep",
+    ".editorconfig",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.json",
+    ".eslintrc.yml",
+    ".eslintignore",
+    ".prettierrc",
+    ".prettierrc.js",
+    ".prettierrc.json",
+    ".prettierignore",
+    ".stylelintrc",
+    ".stylelintrc.json",
+    ".babelrc",
+    ".babelrc.js",
+    ".babelrc.json",
+    ".npmrc",
+    ".npmignore",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".env",
+    ".env.example",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    ".dockerignore",
+    ".htaccess",
+    ".flake8",
+    ".pylintrc",
+    ".pyproject.toml",
+    ".python-version",
+    ".rubocop.yml",
+    ".ruby-version",
+    ".ruby-gemset",
+    ".php-cs-fixer.php",
+    ".php-cs-fixer.dist.php",
+    ".phpunit.xml",
+    ".phpunit.result.cache",
+    ".travis.yml",
+    ".circleci",
+    ".github",
+    ".vscode",
+    ".idea",
+    ".DS_Store",
+    ".browserslistrc",
+    ".nvmrc",
+    ".node-version",
+    ".tool-versions",
+    ".clang-format",
+    ".clang-tidy",
+    ".rustfmt.toml",
+    ".mailmap",
+    ".gitmessage",
 ];
 
 /// Sensitive targets for symlink attack detection (Rule 11).
 const SENSITIVE_TARGETS: &[&str] = &[
-    ".ssh", ".aws", ".gnupg", ".gpg", "/etc/shadow", "/etc/passwd",
-    ".env", ".git/config", "id_rsa", "id_ed25519", "credentials",
-    ".kube/config", ".docker/config.json", ".npmrc", ".pypirc",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".gpg",
+    "/etc/shadow",
+    "/etc/passwd",
+    ".env",
+    ".git/config",
+    "id_rsa",
+    "id_ed25519",
+    "credentials",
+    ".kube/config",
+    ".docker/config.json",
+    ".npmrc",
+    ".pypirc",
 ];
 
 /// Scan a single line for Tier 2 advanced obfuscation patterns.
@@ -263,11 +310,7 @@ pub fn scan_line(
 }
 
 /// Rule 10: Polyglot file detection — binary magic bytes in source file extensions.
-pub fn check_polyglot(
-    raw_bytes: &[u8],
-    file_path: &str,
-    path: &Path,
-) -> Option<AuditFinding> {
+pub fn check_polyglot(raw_bytes: &[u8], file_path: &str, path: &Path) -> Option<AuditFinding> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !SOURCE_EXTENSIONS.contains(&ext) {
         return None;
@@ -381,8 +424,21 @@ pub fn check_suspicious_dotfile(path: &Path) -> Option<AuditFinding> {
 
     let in_source_dir = matches!(
         parent_name,
-        "src" | "lib" | "app" | "pkg" | "internal" | "cmd" | "components" | "pages" | "routes"
-            | "controllers" | "models" | "views" | "services" | "utils" | "helpers"
+        "src"
+            | "lib"
+            | "app"
+            | "pkg"
+            | "internal"
+            | "cmd"
+            | "components"
+            | "pages"
+            | "routes"
+            | "controllers"
+            | "models"
+            | "views"
+            | "services"
+            | "utils"
+            | "helpers"
     );
 
     if !in_source_dir {
@@ -399,10 +455,7 @@ pub fn check_suspicious_dotfile(path: &Path) -> Option<AuditFinding> {
         line_number: None,
         rule_id: "obfuscation-suspicious-dotfile".to_string(),
         severity: Severity::Medium,
-        description: format!(
-            "Unusual dotfile '{}' in source directory",
-            file_name
-        ),
+        description: format!("Unusual dotfile '{}' in source directory", file_name),
         matched_pattern: "suspicious dotfile".to_string(),
         context_lines: vec![path.to_string_lossy().to_string()],
     })
@@ -433,7 +486,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-atob-chain"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-atob-chain"));
     }
 
     #[test]
@@ -500,7 +555,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-php-create-function"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-create-function"));
     }
 
     #[test]
@@ -515,7 +572,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-php-backtick"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-backtick"));
     }
 
     #[test]
@@ -531,7 +590,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-python-dangerous"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-python-dangerous"));
     }
 
     #[test]
@@ -547,7 +608,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-python-dangerous"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-python-dangerous"));
     }
 
     #[test]
@@ -563,8 +626,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-rot13"
-            && f.severity == Severity::High));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-rot13" && f.severity == Severity::High));
     }
 
     #[test]

@@ -15,6 +15,7 @@ use regex::Regex;
 use crate::cli::ScanArgs;
 
 /// File extensions to skip — data/db formats where long whitespace is normal noise
+#[rustfmt::skip]
 const SKIP_EXTENSIONS: &[&str] = &[
     // Data / database
     "jsonl", "ndjson", "json", "bson", "csv", "tsv", "parquet", "avro",
@@ -40,12 +41,10 @@ const SKIP_EXTENSIONS: &[&str] = &[
 ];
 
 fn should_skip_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|ext| {
-            let lower = ext.to_ascii_lowercase();
-            SKIP_EXTENSIONS.contains(&lower.as_str())
-        })
+    path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+        let lower = ext.to_ascii_lowercase();
+        SKIP_EXTENSIONS.contains(&lower.as_str())
+    })
 }
 
 struct Finding {

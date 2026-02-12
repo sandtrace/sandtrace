@@ -10,8 +10,21 @@ use std::path::Path;
 
 /// Dangerous function/command names used by multiple rules (3, 5, 13, 14).
 pub const DANGEROUS_FUNCS: &[&str] = &[
-    "eval", "exec", "system", "require", "import", "function", "settimeout", "setinterval",
-    "shell_exec", "passthru", "popen", "proc_open", "curl", "wget", "fetch",
+    "eval",
+    "exec",
+    "system",
+    "require",
+    "import",
+    "function",
+    "settimeout",
+    "setinterval",
+    "shell_exec",
+    "passthru",
+    "popen",
+    "proc_open",
+    "curl",
+    "wget",
+    "fetch",
 ];
 
 /// Homoglyph character ranges shared between content scanner and filename scanner.
@@ -46,9 +59,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, cb) in b.chars().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1)
-                .min(curr[j] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }

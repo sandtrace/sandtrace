@@ -251,6 +251,11 @@ pub fn config_path() -> PathBuf {
     sandtrace_dir().join("config.toml")
 }
 
+/// Returns the path to the global ignore file (~/.sandtrace/.sandtraceignore)
+pub fn global_ignore_path() -> PathBuf {
+    sandtrace_dir().join(".sandtraceignore")
+}
+
 /// Returns the path to ~/.sandtrace/
 pub fn sandtrace_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());

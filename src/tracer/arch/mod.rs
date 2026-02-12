@@ -2,7 +2,9 @@ use crate::error::{Result, TracerError};
 use crate::event::SyscallCategory;
 use nix::unistd::Pid;
 
+#[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 
 pub trait Architecture: Send + Sync {
@@ -17,7 +19,9 @@ pub trait Architecture: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub enum RawRegisters {
+    #[cfg(target_arch = "x86_64")]
     X86_64(x86_64::UserRegs),
+    #[cfg(target_arch = "aarch64")]
     Aarch64(aarch64::UserRegs),
 }
 
@@ -58,7 +62,9 @@ pub fn read_registers(pid: Pid) -> Result<RawRegisters> {
 
 pub fn write_registers(pid: Pid, regs: &RawRegisters) -> Result<()> {
     match regs {
+        #[cfg(target_arch = "x86_64")]
         RawRegisters::X86_64(r) => x86_64::write_registers(pid, r),
+        #[cfg(target_arch = "aarch64")]
         RawRegisters::Aarch64(r) => aarch64::write_registers(pid, r),
     }
 }

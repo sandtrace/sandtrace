@@ -8,33 +8,27 @@ use super::{is_language, levenshtein};
 
 // --- Lazy-compiled regex patterns ---
 
-static RE_PREG_REPLACE_E: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"preg_replace\s*\(\s*['"].*?/[a-z]*e[a-z]*['"]\s*,"#).unwrap()
-});
+static RE_PREG_REPLACE_E: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"preg_replace\s*\(\s*['"].*?/[a-z]*e[a-z]*['"]\s*,"#).unwrap());
 
-static RE_PROXY_REFLECT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"new\s+Proxy\s*\(|Reflect\.(apply|construct|get)\s*\(").unwrap()
-});
+static RE_PROXY_REFLECT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"new\s+Proxy\s*\(|Reflect\.(apply|construct|get)\s*\(").unwrap());
 
-static RE_JSON_EVAL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(eval\s*\(|Function\s*\(|javascript\s*:|<script)"#).unwrap()
-});
+static RE_JSON_EVAL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(eval\s*\(|Function\s*\(|javascript\s*:|<script)"#).unwrap());
 
 static RE_ENCODED_SHELL_B64: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"echo\s+[A-Za-z0-9+/]{10,}={0,2}\s*\|\s*base64\s+-d\s*\|\s*(sh|bash)").unwrap()
 });
 
-static RE_CURL_PIPE_SHELL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"curl\s+[^\|]+\|\s*(sh|bash)").unwrap()
-});
+static RE_CURL_PIPE_SHELL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"curl\s+[^\|]+\|\s*(sh|bash)").unwrap());
 
-static RE_WGET_PIPE_SHELL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"wget\s+[^\|]+\|\s*(sh|bash)").unwrap()
-});
+static RE_WGET_PIPE_SHELL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"wget\s+[^\|]+\|\s*(sh|bash)").unwrap());
 
-static RE_PYTHON_BASE64_EXEC: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"python[23]?\s+-c\s+['"]import\s+base64"#).unwrap()
-});
+static RE_PYTHON_BASE64_EXEC: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"python[23]?\s+-c\s+['"]import\s+base64"#).unwrap());
 
 static RE_INSTALL_SCRIPT_NODE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"node\s+-e\s+['".]"#).unwrap());
@@ -42,30 +36,94 @@ static RE_INSTALL_SCRIPT_NODE: Lazy<Regex> =
 static RE_INSTALL_SCRIPT_PYTHON: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"python[23]?\s+-c\s+['".]"#).unwrap());
 
-static RE_INSTALL_SCRIPT_HIDDEN_DIR: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\./\.\w+").unwrap());
+static RE_INSTALL_SCRIPT_HIDDEN_DIR: Lazy<Regex> = Lazy::new(|| Regex::new(r"\./\.\w+").unwrap());
 
-static RE_INSTALL_SCRIPT_ENV_URL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\$\w+.*https?://"#).unwrap()
-});
+static RE_INSTALL_SCRIPT_ENV_URL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\$\w+.*https?://"#).unwrap());
 
 /// Popular npm packages for typosquat detection.
 const POPULAR_NPM: &[&str] = &[
-    "express", "react", "lodash", "axios", "webpack", "babel", "eslint", "typescript",
-    "mocha", "jest", "chalk", "commander", "request", "underscore", "async", "moment",
-    "debug", "uuid", "glob", "minimist", "mkdirp", "rimraf", "semver", "yargs",
-    "colors", "bluebird", "cheerio", "dotenv", "mongoose", "socket.io", "redis",
-    "pg", "mysql", "sqlite3", "passport", "bcrypt", "jsonwebtoken", "cors", "helmet",
-    "nodemon", "pm2", "prettier", "esbuild", "vite", "rollup", "parcel", "turbo",
+    "express",
+    "react",
+    "lodash",
+    "axios",
+    "webpack",
+    "babel",
+    "eslint",
+    "typescript",
+    "mocha",
+    "jest",
+    "chalk",
+    "commander",
+    "request",
+    "underscore",
+    "async",
+    "moment",
+    "debug",
+    "uuid",
+    "glob",
+    "minimist",
+    "mkdirp",
+    "rimraf",
+    "semver",
+    "yargs",
+    "colors",
+    "bluebird",
+    "cheerio",
+    "dotenv",
+    "mongoose",
+    "socket.io",
+    "redis",
+    "pg",
+    "mysql",
+    "sqlite3",
+    "passport",
+    "bcrypt",
+    "jsonwebtoken",
+    "cors",
+    "helmet",
+    "nodemon",
+    "pm2",
+    "prettier",
+    "esbuild",
+    "vite",
+    "rollup",
+    "parcel",
+    "turbo",
 ];
 
 /// Popular pip packages for typosquat detection.
 const POPULAR_PIP: &[&str] = &[
-    "requests", "flask", "django", "numpy", "pandas", "scipy", "matplotlib",
-    "tensorflow", "torch", "scikit-learn", "pillow", "boto3", "celery",
-    "redis", "sqlalchemy", "pytest", "setuptools", "pip", "wheel",
-    "cryptography", "pyyaml", "httpx", "fastapi", "uvicorn", "gunicorn",
-    "beautifulsoup4", "selenium", "scrapy", "paramiko", "fabric",
+    "requests",
+    "flask",
+    "django",
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "tensorflow",
+    "torch",
+    "scikit-learn",
+    "pillow",
+    "boto3",
+    "celery",
+    "redis",
+    "sqlalchemy",
+    "pytest",
+    "setuptools",
+    "pip",
+    "wheel",
+    "cryptography",
+    "pyyaml",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "gunicorn",
+    "beautifulsoup4",
+    "selenium",
+    "scrapy",
+    "paramiko",
+    "fabric",
 ];
 
 /// Scan a single line for Tier 3 supply chain patterns.
@@ -161,10 +219,7 @@ pub fn scan_line(
 }
 
 /// Rule 18: Typosquat detection in package manifests.
-pub fn check_typosquat(
-    dir: &Path,
-    config: &ObfuscationConfig,
-) -> Vec<AuditFinding> {
+pub fn check_typosquat(dir: &Path, config: &ObfuscationConfig) -> Vec<AuditFinding> {
     if !config.enable_typosquat {
         return Vec::new();
     }
@@ -198,11 +253,13 @@ pub fn check_typosquat(
         if let Ok(content) = std::fs::read_to_string(&req_txt) {
             let file_path = req_txt.to_string_lossy().to_string();
             for line in content.lines() {
-                let pkg = line.split(&['=', '>', '<', '!', '[', ';'][..]).next().unwrap_or("").trim();
+                let pkg = line
+                    .split(&['=', '>', '<', '!', '[', ';'][..])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
                 if !pkg.is_empty() && !pkg.starts_with('#') {
-                    if let Some(finding) =
-                        check_package_typosquat(pkg, POPULAR_PIP, &file_path)
-                    {
+                    if let Some(finding) = check_package_typosquat(pkg, POPULAR_PIP, &file_path) {
                         findings.push(finding);
                     }
                 }
@@ -214,10 +271,7 @@ pub fn check_typosquat(
 }
 
 /// Rule 19: Dependency confusion detection.
-pub fn check_dependency_confusion(
-    dir: &Path,
-    config: &ObfuscationConfig,
-) -> Vec<AuditFinding> {
+pub fn check_dependency_confusion(dir: &Path, config: &ObfuscationConfig) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
 
     let pkg_json = dir.join("package.json");
@@ -299,7 +353,13 @@ pub fn check_install_scripts(dir: &Path) -> Vec<AuditFinding> {
     };
 
     let file_path = pkg_json.to_string_lossy().to_string();
-    let install_hooks = ["preinstall", "postinstall", "preuninstall", "postuninstall", "prepare"];
+    let install_hooks = [
+        "preinstall",
+        "postinstall",
+        "preuninstall",
+        "postuninstall",
+        "prepare",
+    ];
 
     if let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) {
         for hook in &install_hooks {
@@ -325,10 +385,7 @@ pub fn check_install_scripts(dir: &Path) -> Vec<AuditFinding> {
                         line_number: None,
                         rule_id: "obfuscation-install-script-chain".to_string(),
                         severity: Severity::Critical,
-                        description: format!(
-                            "Suspicious '{}' install script: {}",
-                            hook, reason
-                        ),
+                        description: format!("Suspicious '{}' install script: {}", hook, reason),
                         matched_pattern: "install script chain".to_string(),
                         context_lines: vec![format!("\"{}\": \"{}\"", hook, script)],
                     });
@@ -340,11 +397,7 @@ pub fn check_install_scripts(dir: &Path) -> Vec<AuditFinding> {
     findings
 }
 
-fn check_package_typosquat(
-    name: &str,
-    popular: &[&str],
-    file_path: &str,
-) -> Option<AuditFinding> {
+fn check_package_typosquat(name: &str, popular: &[&str], file_path: &str) -> Option<AuditFinding> {
     let name_lower = name.to_lowercase();
 
     for &popular_name in popular {
@@ -396,7 +449,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-php-preg-replace-e"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-preg-replace-e"));
     }
 
     #[test]
@@ -404,18 +459,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
-            r#"{{"key": "eval(atob('bWFsaWNpb3Vz'))"}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"key": "eval(atob('bWFsaWNpb3Vz'))"}}"#).unwrap();
 
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-json-eval"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-json-eval"));
     }
 
     #[test]
@@ -423,18 +476,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("install.sh");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
-            "echo dGVzdHBheWxvYWQ= | base64 -d | sh"
-        )
-        .unwrap();
+        writeln!(f, "echo dGVzdHBheWxvYWQ= | base64 -d | sh").unwrap();
 
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-encoded-shell"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-encoded-shell"));
     }
 
     #[test]
@@ -449,7 +500,9 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-encoded-shell"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-encoded-shell"));
     }
 
     #[test]
@@ -457,18 +510,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("package.json");
         let mut f = std::fs::File::create(&pkg).unwrap();
-        writeln!(
-            f,
-            r#"{{"dependencies": {{"expres": "^4.0.0"}}}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"dependencies": {{"expres": "^4.0.0"}}}}"#).unwrap();
 
         let config = ObfuscationConfig {
             enable_typosquat: true,
             ..ObfuscationConfig::default()
         };
         let findings = check_typosquat(dir.path(), &config);
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-typosquat"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-typosquat"));
     }
 
     #[test]
@@ -476,11 +527,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("package.json");
         let mut f = std::fs::File::create(&pkg).unwrap();
-        writeln!(
-            f,
-            r#"{{"dependencies": {{"express": "^4.0.0"}}}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"dependencies": {{"express": "^4.0.0"}}}}"#).unwrap();
 
         let config = ObfuscationConfig {
             enable_typosquat: true,
@@ -495,11 +542,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("package.json");
         let mut f = std::fs::File::create(&pkg).unwrap();
-        writeln!(
-            f,
-            r#"{{"dependencies": {{"expres": "^4.0.0"}}}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"dependencies": {{"expres": "^4.0.0"}}}}"#).unwrap();
 
         let config = ObfuscationConfig::default(); // enable_typosquat defaults to false
         let findings = check_typosquat(dir.path(), &config);
@@ -519,7 +562,9 @@ mod tests {
 
         let config = ObfuscationConfig::default();
         let findings = check_dependency_confusion(dir.path(), &config);
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-dependency-confusion"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-dependency-confusion"));
     }
 
     #[test]
@@ -554,7 +599,9 @@ mod tests {
         .unwrap();
 
         let findings = check_install_scripts(dir.path());
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-install-script-chain"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-install-script-chain"));
     }
 
     #[test]
@@ -569,6 +616,8 @@ mod tests {
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings.iter().any(|f| f.rule_id == "obfuscation-proxy-reflect"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-proxy-reflect"));
     }
 }

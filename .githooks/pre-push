@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running pre-push checks..."
+
+echo "  cargo fmt --check"
+cargo fmt -- --check
+
+echo "  cargo test"
+cargo test --quiet 2>/dev/null
+
+echo "Pre-push checks passed."

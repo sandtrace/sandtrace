@@ -151,7 +151,8 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
     // Per-directory: auto-discover .sandtraceignore in any traversed directory
     builder.add_custom_ignore_filename(".sandtraceignore");
 
-    builder.filter_entry(|entry| {
+    builder
+        .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
             // Skip hidden directories (but allow hidden files)
             if name.starts_with('.') && entry.file_type().is_some_and(|ft| ft.is_dir()) {

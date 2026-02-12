@@ -134,7 +134,8 @@ pub fn run_scan(args: ScanArgs) -> Result<()> {
     // Per-directory: auto-discover .sandtraceignore in any traversed directory
     builder.add_custom_ignore_filename(".sandtraceignore");
 
-    let paths: Vec<PathBuf> = builder.filter_entry(|entry| {
+    let paths: Vec<PathBuf> = builder
+        .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),

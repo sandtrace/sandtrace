@@ -90,6 +90,12 @@ const POPULAR_NPM: &[&str] = &[
     "rollup",
     "parcel",
     "turbo",
+    "supports-color",
+    "nanoid",
+    "hardhat",
+    "secp256k1",
+    "claude-code",
+    "openclaw",
 ];
 
 /// Popular pip packages for typosquat detection.

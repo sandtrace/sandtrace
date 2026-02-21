@@ -14,6 +14,60 @@ use regex::Regex;
 
 use crate::cli::ScanArgs;
 
+/// Patterns that indicate the content after whitespace is actually suspicious,
+/// not just over-indented normal code. If none of these match, the finding is
+/// suppressed as a false positive (e.g. deeply indented Blade/Alpine classes).
+const SUSPICIOUS_AFTER_WS: &[&str] = &[
+    // Code execution / injection
+    "eval(",
+    "exec(",
+    "system(",
+    "passthru(",
+    "shell_exec(",
+    "atob(",
+    "btoa(",
+    "base64_decode(",
+    "base64_encode(",
+    "document.write(",
+    "innerhtml",
+    "outerhtml",
+    "importscripts(",
+    "module._compile(",
+    // Shell commands
+    "curl ",
+    "wget ",
+    "nc ",
+    "bash ",
+    "/bin/sh",
+    "/bin/bash",
+    "powershell",
+    "cmd.exe",
+    // XSS / injection
+    "<script",
+    "javascript:",
+    "onerror=",
+    "onload=",
+    // Hex/unicode escapes (obfuscation)
+    "\\x",
+    "\\u00",
+    // Prompt injection / MCP
+    "<important>",
+    "do not mention",
+    "do not tell",
+    "handled automatically",
+    // Credential exfiltration
+    "id_rsa",
+    ".aws/credentials",
+    ".npmrc",
+    ".ssh/",
+    // Network exfil
+    "http://",
+    "https://",
+    "fetch(",
+    "xmlhttprequest",
+    "new request(",
+];
+
 /// File extensions to skip — data/db formats where long whitespace is normal noise
 #[rustfmt::skip]
 const SKIP_EXTENSIONS: &[&str] = &[
@@ -80,6 +134,15 @@ fn scan_file(path: &PathBuf, pattern: &Regex, max_size: u64) -> Vec<Finding> {
 
         if let Some(mat) = pattern.find(&line) {
             let ws_count = mat.end() - mat.start();
+
+            // False positive filtering: check what comes after the whitespace.
+            // If the content is normal code (class names, HTML attributes, SQL, etc.)
+            // and contains no suspicious patterns, skip it.
+            let after_ws = &line[mat.end()..];
+            if !after_ws.trim().is_empty() && !is_suspicious_content(after_ws) {
+                continue;
+            }
+
             let preview = if line.len() > 120 {
                 let mut end = 120;
                 while !line.is_char_boundary(end) {
@@ -100,6 +163,13 @@ fn scan_file(path: &PathBuf, pattern: &Regex, max_size: u64) -> Vec<Finding> {
     }
 
     findings
+}
+
+/// Check if content following a whitespace run contains suspicious patterns.
+/// Returns false for normal over-indented code (CSS classes, HTML attributes, SQL).
+fn is_suspicious_content(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    SUSPICIOUS_AFTER_WS.iter().any(|p| lower.contains(p))
 }
 
 pub fn run_scan(args: ScanArgs) -> Result<()> {

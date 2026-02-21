@@ -440,10 +440,123 @@ pub fn exfiltration_rules() -> Vec<DetectionRule> {
     }]
 }
 
+pub fn ai_toolchain_rules() -> Vec<DetectionRule> {
+    vec![
+        DetectionRule {
+            id: "ai-toolchain-config-write-claude".to_string(),
+            name: "Claude Config Modification".to_string(),
+            severity: Severity::Critical,
+            description: "Non-Claude process modifying Claude Code/Desktop config".to_string(),
+            detection: Detection {
+                file_paths: vec![
+                    "~/.claude/settings.json".to_string(),
+                    "~/.claude/claude_desktop_config.json".to_string(),
+                ],
+                excluded_processes: vec![
+                    "claude".to_string(),
+                    "claude-desktop".to_string(),
+                    "Claude".to_string(),
+                ],
+                file_patterns: vec![],
+                content_patterns: vec![],
+                process_names: vec![],
+                condition: None,
+                access_types: vec!["write".into(), "create".into()],
+            },
+            alert: AlertConfig {
+                channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
+                message: Some(
+                    "AI config tampered: {process_name} (PID: {pid}) modified Claude settings"
+                        .to_string(),
+                ),
+            },
+            tags: vec!["ai-toolchain".to_string(), "mcp".to_string()],
+            enabled: Some(true),
+        },
+        DetectionRule {
+            id: "ai-toolchain-config-write-cursor".to_string(),
+            name: "Cursor MCP Config Modification".to_string(),
+            severity: Severity::Critical,
+            description: "Non-Cursor process modifying Cursor MCP config".to_string(),
+            detection: Detection {
+                file_paths: vec!["~/.cursor/mcp.json".to_string()],
+                excluded_processes: vec![
+                    "cursor".to_string(),
+                    "Cursor".to_string(),
+                    "code".to_string(),
+                ],
+                file_patterns: vec![],
+                content_patterns: vec![],
+                process_names: vec![],
+                condition: None,
+                access_types: vec!["write".into(), "create".into()],
+            },
+            alert: AlertConfig {
+                channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
+                message: Some(
+                    "AI config tampered: {process_name} (PID: {pid}) modified Cursor MCP config"
+                        .to_string(),
+                ),
+            },
+            tags: vec!["ai-toolchain".to_string(), "mcp".to_string()],
+            enabled: Some(true),
+        },
+        DetectionRule {
+            id: "ai-toolchain-config-write-continue".to_string(),
+            name: "Continue Config Modification".to_string(),
+            severity: Severity::Critical,
+            description: "Non-VS Code process modifying Continue config".to_string(),
+            detection: Detection {
+                file_paths: vec!["~/.continue/config.json".to_string()],
+                excluded_processes: vec!["code".to_string(), "continue".to_string()],
+                file_patterns: vec![],
+                content_patterns: vec![],
+                process_names: vec![],
+                condition: None,
+                access_types: vec!["write".into(), "create".into()],
+            },
+            alert: AlertConfig {
+                channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
+                message: Some(
+                    "AI config tampered: {process_name} (PID: {pid}) modified Continue config"
+                        .to_string(),
+                ),
+            },
+            tags: vec!["ai-toolchain".to_string(), "mcp".to_string()],
+            enabled: Some(true),
+        },
+        DetectionRule {
+            id: "ai-toolchain-config-write-windsurf".to_string(),
+            name: "Windsurf MCP Config Modification".to_string(),
+            severity: Severity::Critical,
+            description: "Non-Windsurf process modifying Windsurf MCP config".to_string(),
+            detection: Detection {
+                file_paths: vec!["~/.windsurf/mcp.json".to_string()],
+                excluded_processes: vec!["windsurf".to_string(), "codeium".to_string()],
+                file_patterns: vec![],
+                content_patterns: vec![],
+                process_names: vec![],
+                condition: None,
+                access_types: vec!["write".into(), "create".into()],
+            },
+            alert: AlertConfig {
+                channels: vec![AlertChannel::Stdout, AlertChannel::Desktop],
+                message: Some(
+                    "AI config tampered: {process_name} (PID: {pid}) modified Windsurf MCP config"
+                        .to_string(),
+                ),
+            },
+            tags: vec!["ai-toolchain".to_string(), "mcp".to_string()],
+            enabled: Some(true),
+        },
+    ]
+}
+
 pub fn all_builtin_rules() -> Vec<DetectionRule> {
     let mut rules = Vec::new();
     rules.extend(credential_access_rules());
     rules.extend(supply_chain_rules());
     rules.extend(exfiltration_rules());
+    rules.extend(ai_toolchain_rules());
     rules
 }

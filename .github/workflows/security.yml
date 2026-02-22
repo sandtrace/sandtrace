@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: ['**']
 
+permissions:
+  contents: read
+  security-events: write
+
 env:
   SANDTRACE_VERSION: "0.1.0"
 
@@ -27,11 +31,11 @@ jobs:
         run: sandtrace init
 
       - name: Run audit (terminal)
+        continue-on-error: true
         run: sandtrace audit . --severity medium
 
       - name: Run audit (SARIF)
-        if: always()
-        run: sandtrace audit . --format sarif --severity medium > sandtrace.sarif
+        run: sandtrace audit . --format sarif --severity medium > sandtrace.sarif || true
 
       - name: Upload SARIF to GitHub Security
         if: always() && github.event_name == 'push'

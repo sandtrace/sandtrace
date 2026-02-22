@@ -76,6 +76,10 @@ sandtrace run --allow-path ./project --output trace.jsonl npm install
 
 The docs cover all commands, flags, configuration, custom rules, policies, CI/CD integration, and architecture.
 
+## Maintained by
+
+[Closed Circuit Inc.](https://closedcircuit.io) and [Closed Circuit Consultants](https://closedcircuitconsultants.com)
+
 ## License
 
 MIT OR Apache-2.0

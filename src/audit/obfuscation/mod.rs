@@ -1,4 +1,5 @@
 pub mod advanced;
+pub mod ai_toolchain;
 pub mod encoding;
 pub mod supply_chain;
 
@@ -263,6 +264,9 @@ pub fn scan_file(
 
         // --- New rules: Tier 3 (supply chain per-line) ---
         supply_chain::scan_line(line, line_number, &file_path_str, path, &mut findings);
+
+        // --- New rules: Tier 4 (AI toolchain per-line) ---
+        ai_toolchain::scan_line(line, line_number, &file_path_str, path, &mut findings);
     }
 
     // 4. Base64-encoded content in unexpected file types

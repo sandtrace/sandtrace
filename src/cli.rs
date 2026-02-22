@@ -149,7 +149,7 @@ pub struct ScanArgs {
     pub target: String,
 
     /// Minimum consecutive whitespace characters to flag
-    #[arg(short = 'n', long, default_value_t = 50)]
+    #[arg(short = 'n', long, default_value_t = 100)]
     pub min_whitespace: usize,
 
     /// Show line preview for each finding

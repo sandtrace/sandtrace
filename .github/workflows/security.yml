@@ -7,7 +7,7 @@ on:
     branches: ['**']
 
 env:
-  CARGO_TERM_COLOR: always
+  SANDTRACE_VERSION: "0.1.0"
 
 jobs:
   sandtrace-audit:
@@ -16,32 +16,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build sandtrace
-        run: cargo build --release
+      - name: Install sandtrace
+        run: |
+          curl -sSfL "https://github.com/sandtrace/sandtrace/releases/download/v${SANDTRACE_VERSION}/sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o sandtrace.tar.gz
+          tar xzf sandtrace.tar.gz
+          sudo mv sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu/sandtrace /usr/local/bin/
+          rm -rf sandtrace.tar.gz sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu
 
       - name: Initialize sandtrace
-        run: ./target/release/sandtrace init
+        run: sandtrace init
 
       - name: Run audit (terminal)
-        run: ./target/release/sandtrace audit . --severity medium
+        run: sandtrace audit . --severity medium
 
       - name: Run audit (SARIF)
         if: always()
-        run: ./target/release/sandtrace audit . --format sarif --severity medium > sandtrace.sarif
+        run: sandtrace audit . --format sarif --severity medium > sandtrace.sarif
 
       - name: Upload SARIF to GitHub Security
         if: always() && github.event_name == 'push'
@@ -56,22 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build sandtrace
-        run: cargo build --release
+      - name: Install sandtrace
+        run: |
+          curl -sSfL "https://github.com/sandtrace/sandtrace/releases/download/v${SANDTRACE_VERSION}/sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o sandtrace.tar.gz
+          tar xzf sandtrace.tar.gz
+          sudo mv sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu/sandtrace /usr/local/bin/
+          rm -rf sandtrace.tar.gz sandtrace-v${SANDTRACE_VERSION}-x86_64-unknown-linux-gnu
 
       - name: Run obfuscation scan
-        run: ./target/release/sandtrace scan . --verbose
+        run: sandtrace scan . --verbose

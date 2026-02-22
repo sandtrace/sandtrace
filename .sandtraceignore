@@ -1,0 +1,14 @@
+# Sandtrace's own detection engine source contains intentional test patterns
+# (fake AWS keys, eval constructs, obfuscation examples) that trigger findings.
+src/audit/scanner.rs
+src/audit/obfuscation/encoding.rs
+src/audit/obfuscation/supply_chain.rs
+src/audit/obfuscation/advanced.rs
+src/audit/obfuscation/mod.rs
+
+# Test fixtures
+tests/
+
+# Build artifacts (not in git, but present locally)
+docs/book/
+target/

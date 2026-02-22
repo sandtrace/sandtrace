@@ -6,7 +6,7 @@ rust-version = "1.75"
 authors = ["Sandtrace Contributors"]
 description = "A Rust-based malware sandbox tool with syscall tracing and filesystem restriction"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/sandtrace"
+repository = "https://github.com/sandtrace/sandtrace"
 keywords = ["sandbox", "security", "ptrace", "syscall", "malware"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 

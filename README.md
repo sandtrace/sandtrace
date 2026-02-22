@@ -72,7 +72,7 @@ sandtrace run --allow-path ./project --output trace.jsonl npm install
 
 ## Documentation
 
-**Read the full documentation at [https://cc-consulting-nv.github.io/sandtrace/](https://cc-consulting-nv.github.io/sandtrace/)**
+**Read the full documentation at [https://sandtrace.github.io/sandtrace/](https://sandtrace.github.io/sandtrace/)**
 
 The docs cover all commands, flags, configuration, custom rules, policies, CI/CD integration, and architecture.
 

@@ -60,7 +60,7 @@ Note: The [always-blocked syscalls](./commands/run.md#always-blocked-syscalls) a
 
 ## Example policies
 
-Example policies are included in the [`examples/`](https://github.com/cc-consulting-nv/sandtrace/tree/main/examples) directory:
+Example policies are included in the [`examples/`](https://github.com/sandtrace/sandtrace/tree/main/examples) directory:
 
 | File | Description |
 |------|-------------|

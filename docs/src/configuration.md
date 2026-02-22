@@ -39,7 +39,7 @@ pattern = "malware-c2.example.com"
 tags = ["ioc", "c2"]
 ```
 
-See [`examples/config.toml`](https://github.com/cc-consulting-nv/sandtrace/blob/main/examples/config.toml) for a fully commented example.
+See [`examples/config.toml`](https://github.com/sandtrace/sandtrace/blob/main/examples/config.toml) for a fully commented example.
 
 ## Settings
 

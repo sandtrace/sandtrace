@@ -8,4 +8,4 @@ description = "Documentation for sandtrace — a Rust security tool for malware 
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/cc-consulting-nv/sandtrace"
+git-repository-url = "https://github.com/sandtrace/sandtrace"

@@ -133,6 +133,18 @@ const CREDENTIAL_PATTERNS: &[ContentPattern] = &[
         severity: Severity::Critical,
         pattern: r"(sk|pk)_(test|live)_[0-9a-zA-Z]{24,}",
     },
+    ContentPattern {
+        rule_id: "cred-openai-key",
+        description: "OpenAI API key found in source",
+        severity: Severity::Critical,
+        pattern: r"sk-proj-[A-Za-z0-9_-]{20,}",
+    },
+    ContentPattern {
+        rule_id: "cred-anthropic-key",
+        description: "Anthropic API key found in source",
+        severity: Severity::Critical,
+        pattern: r"sk-ant-api03-[A-Za-z0-9_-]{20,}",
+    },
 ];
 
 pub fn scan_file_content(

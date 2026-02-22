@@ -95,6 +95,18 @@ pub fn run_audit_with_config(
         obfuscation::supply_chain::check_install_scripts(&args.target);
     findings.append(&mut install_script_findings);
 
+    // AI toolchain checks (MCP injection, rogue servers, git template poisoning)
+    let mut mcp_findings = obfuscation::ai_toolchain::check_mcp_config_tampering(&args.target);
+    findings.append(&mut mcp_findings);
+
+    let mut rogue_server_findings =
+        obfuscation::ai_toolchain::check_rogue_mcp_servers(&args.target);
+    findings.append(&mut rogue_server_findings);
+
+    let mut git_template_findings =
+        obfuscation::ai_toolchain::check_global_git_template_poisoning(&args.target);
+    findings.append(&mut git_template_findings);
+
     // Filter by severity
     findings.retain(|f| f.severity >= min_severity);
 

@@ -66,6 +66,9 @@ const REDACTION_MARKERS: &[&str] = &[
     "log::",
     "logger.",
     "console.log",
+    "console.error",
+    "console.warn",
+    "console.debug",
     "this->error(",
     "this->info(",
     "str::take(",
@@ -624,5 +627,48 @@ mod tests {
         // .txt file should be skipped because file_extensions only includes rs and js
         let findings = scan_file_content(&file_path, &config).unwrap();
         assert!(!findings.iter().any(|f| f.rule_id == "ioc-c2-domain"));
+    }
+
+    #[test]
+    fn test_skip_console_error_password_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("settings.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "try {{").unwrap();
+        writeln!(file, "    await updatePassword(newPwd);").unwrap();
+        writeln!(file, "}} catch (error) {{").unwrap();
+        writeln!(
+            file,
+            "    console.error('Failed to update password:', error);"
+        )
+        .unwrap();
+        writeln!(file, "    throw error;").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "cred-generic-password"),
+            "console.error password references should be skipped as false positives"
+        );
+    }
+
+    #[test]
+    fn test_skip_console_warn_secret_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("auth.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(
+            file,
+            "console.warn('Invalid secret token:', 'check configuration');"
+        )
+        .unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "console.warn secret references should be skipped as false positives"
+        );
     }
 }

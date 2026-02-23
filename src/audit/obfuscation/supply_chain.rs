@@ -301,17 +301,20 @@ pub fn check_dependency_confusion(dir: &Path, config: &ObfuscationConfig) -> Vec
     for section in ["dependencies", "devDependencies"] {
         if let Some(deps) = json.get(section).and_then(|d| d.as_object()) {
             for dep_name in deps.keys() {
-                // Check for scoped packages that look internal
-                let looks_internal = dep_name.starts_with('@')
-                    || internal_markers.iter().any(|m| dep_name.contains(m));
+                // A scoped package (@scope/pkg) is only suspicious if the name
+                // also contains internal markers. Being scoped alone is not
+                // enough — most public npm packages use scopes.
+                let has_internal_marker = internal_markers.iter().any(|m| dep_name.contains(m));
 
-                // Check against known prefixes from config
+                // Check against user-configured known internal prefixes
                 let matches_prefix = config
                     .known_internal_prefixes
                     .iter()
                     .any(|prefix| dep_name.starts_with(prefix.as_str()));
 
-                if looks_internal || matches_prefix {
+                let looks_internal = has_internal_marker || matches_prefix;
+
+                if looks_internal {
                     // Check if there's a .npmrc with registry config
                     let has_private_registry = dir.join(".npmrc").exists();
 
@@ -591,6 +594,46 @@ mod tests {
         let config = ObfuscationConfig::default();
         let findings = check_dependency_confusion(dir.path(), &config);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_dependency_confusion_skips_public_scoped_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        let mut f = std::fs::File::create(&pkg).unwrap();
+        writeln!(
+            f,
+            r#"{{"devDependencies": {{"@tailwindcss/vite": "^4.0.0", "@types/node": "^20.0.0", "@vue/compiler-sfc": "^3.0.0"}}}}"#
+        )
+        .unwrap();
+
+        let config = ObfuscationConfig::default();
+        let findings = check_dependency_confusion(dir.path(), &config);
+        assert!(
+            findings.is_empty(),
+            "Public scoped packages should not be flagged as dependency confusion"
+        );
+    }
+
+    #[test]
+    fn test_dependency_confusion_flags_internal_scoped_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        let mut f = std::fs::File::create(&pkg).unwrap();
+        writeln!(
+            f,
+            r#"{{"dependencies": {{"@mycompany/auth-internal": "^1.0.0"}}}}"#
+        )
+        .unwrap();
+
+        let config = ObfuscationConfig::default();
+        let findings = check_dependency_confusion(dir.path(), &config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-dependency-confusion"),
+            "Scoped packages with internal markers should still be flagged"
+        );
     }
 
     #[test]

@@ -230,7 +230,13 @@ pub fn scan_file(
                 let hidden_lower = hidden.to_lowercase();
                 let is_suspicious = SUSPICIOUS_PATTERNS.iter().any(|p| hidden_lower.contains(p));
 
-                if is_suspicious {
+                // If the visible portion has an unclosed HTML tag (< without >),
+                // the hidden content is just attribute continuation, not a payload.
+                let in_open_html_tag = visible
+                    .rfind('<')
+                    .map_or(false, |lt| !visible[lt..].contains('>'));
+
+                if is_suspicious && !in_open_html_tag {
                     let visible_preview: String = visible.chars().take(80).collect();
                     let hidden_preview: String = hidden.chars().take(80).collect();
                     findings.push(AuditFinding {
@@ -466,6 +472,53 @@ mod tests {
             .filter(|f| f.rule_id == "obfuscation-hidden-content")
             .collect();
         assert!(!hidden_findings.is_empty());
+    }
+
+    #[test]
+    fn test_html_attribute_continuation_not_flagged() {
+        // Long <img> tag where onload= sits past the steg column — should NOT flag
+        // because the visible portion has an unclosed HTML tag (attribute continuation).
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("cybersecurity.blade.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        let config = test_obfuscation_config();
+        let visible = "<img src=\"https://fast.wistia.com/embed/medias/abc123/swatch\" alt=\"Platform Video\" aria-hidden=\"true\"";
+        let padding = " ".repeat(config.steganographic_column - visible.len());
+        let hidden = "onload=\"this.parentNode.style.opacity=1;\" />";
+        write!(file, "{}{}{}", visible, padding, hidden).unwrap();
+
+        let findings = scan_file(&file_path, &config).unwrap();
+        let hidden_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-hidden-content")
+            .collect();
+        assert!(
+            hidden_findings.is_empty(),
+            "onload= inside an open HTML tag is attribute continuation, not a payload"
+        );
+    }
+
+    #[test]
+    fn test_hidden_onload_outside_html_tag_still_flagged() {
+        // onload= past the steg column where the visible portion is NOT an open tag — should flag.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("suspicious.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        let config = test_obfuscation_config();
+        let visible = "const x = 1;";
+        let padding = " ".repeat(config.steganographic_column - visible.len());
+        let hidden = "onload=\"fetch('https://evil.com')\"";
+        write!(file, "{}{}{}", visible, padding, hidden).unwrap();
+
+        let findings = scan_file(&file_path, &config).unwrap();
+        let hidden_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-hidden-content")
+            .collect();
+        assert!(
+            !hidden_findings.is_empty(),
+            "onload= hidden in non-HTML context should still be flagged"
+        );
     }
 
     #[test]

@@ -255,22 +255,24 @@ fn is_scannable(path: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .map(|n| {
-            matches!(
-                n.to_lowercase().as_str(),
-                ".env"
-                    | ".npmrc"
-                    | ".yarnrc"
-                    | "package.json"
-                    | "package-lock.json"
-                    | "composer.json"
-                    | "cargo.toml"
-                    | "requirements.txt"
-                    | "pipfile"
-                    | "gemfile"
-                    | "dockerfile"
-                    | "makefile"
-                    | ".gitignore"
-            )
+            let lower = n.to_lowercase();
+            // Match all .env variants: .env, .env.local, .env.production, etc.
+            lower.starts_with(".env")
+                || matches!(
+                    lower.as_str(),
+                    ".npmrc"
+                        | ".yarnrc"
+                        | "package.json"
+                        | "package-lock.json"
+                        | "composer.json"
+                        | "cargo.toml"
+                        | "requirements.txt"
+                        | "pipfile"
+                        | "gemfile"
+                        | "dockerfile"
+                        | "makefile"
+                        | ".gitignore"
+                )
         })
         .unwrap_or(false)
 }
@@ -364,4 +366,31 @@ fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
     })?;
     println!("{}", json);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_scannable_env_variants() {
+        assert!(is_scannable(Path::new("/project/.env")));
+        assert!(is_scannable(Path::new("/project/.env.local")));
+        assert!(is_scannable(Path::new("/project/.env.production")));
+        assert!(is_scannable(Path::new("/project/.env.staging")));
+        assert!(is_scannable(Path::new("/project/.env.development")));
+    }
+
+    #[test]
+    fn test_is_scannable_common_extensions() {
+        assert!(is_scannable(Path::new("/project/app.js")));
+        assert!(is_scannable(Path::new("/project/config.yaml")));
+        assert!(is_scannable(Path::new("/project/main.rs")));
+    }
+
+    #[test]
+    fn test_is_scannable_rejects_binary() {
+        assert!(!is_scannable(Path::new("/project/image.png")));
+        assert!(!is_scannable(Path::new("/project/binary.exe")));
+    }
 }

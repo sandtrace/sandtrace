@@ -150,6 +150,14 @@ const CREDENTIAL_PATTERNS: &[ContentPattern] = &[
     },
 ];
 
+/// Patterns for .env files where values are unquoted (KEY=value format).
+const ENV_FILE_PATTERNS: &[ContentPattern] = &[ContentPattern {
+    rule_id: "cred-env-secret",
+    description: "Secret/token/key in .env file",
+    severity: Severity::High,
+    pattern: r"(?im)^[A-Z_]*(SECRET|TOKEN|PASSWORD|PASSWD|KEY|AUTH)[A-Z_]*\s*=\s*[^\s#${\(]{8,}",
+}];
+
 pub fn scan_file_content(
     path: &Path,
     config: &SandtraceConfig,
@@ -168,13 +176,23 @@ pub fn scan_file_content(
         return Ok(findings);
     }
 
-    // Skip config files that legitimately contain credentials
-    if matches!(file_name, ".env" | ".env.local" | ".claude.json") {
+    // Skip config files that are not secrets containers
+    if file_name == ".claude.json" {
         return Ok(findings);
     }
 
     // Build the full pattern list: built-in + custom from config
-    let mut all_patterns: Vec<ScanPattern> = CREDENTIAL_PATTERNS
+    let is_env_file = file_name.to_lowercase().starts_with(".env");
+    let builtin_patterns = if is_env_file {
+        CREDENTIAL_PATTERNS
+            .iter()
+            .chain(ENV_FILE_PATTERNS.iter())
+            .collect::<Vec<_>>()
+    } else {
+        CREDENTIAL_PATTERNS.iter().collect::<Vec<_>>()
+    };
+
+    let mut all_patterns: Vec<ScanPattern> = builtin_patterns
         .iter()
         .map(|p| ScanPattern {
             rule_id: p.rule_id.to_string(),
@@ -669,6 +687,78 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
             "console.warn secret references should be skipped as false positives"
+        );
+    }
+
+    #[test]
+    fn test_detect_credentials_in_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "AWS_ACCESS_KEY_ID=AKIAI44QH8DHBG5BREAL").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-aws-key"),
+            ".env files should be scanned for credentials"
+        );
+    }
+
+    #[test]
+    fn test_detect_credentials_in_env_production() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".env.production");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "-----BEGIN RSA PRIVATE KEY-----").unwrap();
+        writeln!(file, "MIIBogIBAAJBALRiMLAHudeSA/x3hB2f+2NRkJyBIZ").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-private-key"),
+            ".env.production files should be scanned for credentials"
+        );
+    }
+
+    #[test]
+    fn test_detect_credentials_in_env_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".env.local");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "-----BEGIN RSA PRIVATE KEY-----").unwrap();
+        writeln!(file, "MIIBogIBAAJBALRiMLAHudeSA/x3hB2f+2NRkJyBIZ").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-private-key"),
+            ".env.local files should be scanned for credentials"
+        );
+    }
+
+    #[test]
+    fn test_detect_unquoted_env_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".env.production");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "VITE_GIPHY_API_KEY=abc123def456ghi789").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-env-secret"),
+            ".env files should detect unquoted secret/key/token values"
+        );
+    }
+
+    #[test]
+    fn test_unquoted_token_not_flagged_in_source_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("auth.ts");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "const accessToken = response.accessToken;").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-env-secret"),
+            "Unquoted token references in source code should not trigger env-specific patterns"
         );
     }
 }

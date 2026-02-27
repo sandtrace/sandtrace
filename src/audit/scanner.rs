@@ -26,6 +26,8 @@ const REDACTION_MARKERS: &[&str] = &[
     "your_password",
     "your-password",
     "changeme",
+    "change_me",
+    "change-me",
     "replace_me",
     "replace-me",
     "sample_token",
@@ -155,8 +157,30 @@ const ENV_FILE_PATTERNS: &[ContentPattern] = &[ContentPattern {
     rule_id: "cred-env-secret",
     description: "Secret/token/key in .env file",
     severity: Severity::High,
-    pattern: r"(?im)^[A-Z_]*(SECRET|TOKEN|PASSWORD|PASSWD|KEY|AUTH)[A-Z_]*\s*=\s*[^\s#${\(]{8,}",
+    pattern: r"(?im)^[A-Z_]*(SECRET|TOKEN|PASSWORD|PASSWD|KEY|AUTH)[A-Z_]*[ \t]*=[ \t]*\S{8,}",
 }];
+
+/// Check if a file is ignored by git (not tracked and matches .gitignore).
+/// Returns false if not in a git repo or if git check fails.
+fn is_git_ignored(path: &Path) -> bool {
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let dir = abs_path.parent().unwrap_or(Path::new("."));
+    std::process::Command::new("git")
+        .args(["check-ignore", "-q"])
+        .arg(&abs_path)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 pub fn scan_file_content(
     path: &Path,
@@ -182,8 +206,21 @@ pub fn scan_file_content(
     }
 
     // Build the full pattern list: built-in + custom from config
-    let is_env_file = file_name.to_lowercase().starts_with(".env");
-    let builtin_patterns = if is_env_file {
+    let lower_name = file_name.to_lowercase();
+    let is_env_file = lower_name.starts_with(".env");
+
+    // For .env files: skip git-ignored files entirely (local-only secrets, not a repo risk)
+    if is_env_file && is_git_ignored(path) {
+        return Ok(findings);
+    }
+
+    // .env.example and .env.testing are templates/test config — use built-in patterns
+    // only (they may still contain real key formats like AWS keys), but skip env-specific
+    // patterns that would flag placeholder values
+    let use_env_patterns =
+        is_env_file && !lower_name.ends_with(".example") && !lower_name.ends_with(".testing");
+
+    let builtin_patterns = if use_env_patterns {
         CREDENTIAL_PATTERNS
             .iter()
             .chain(ENV_FILE_PATTERNS.iter())

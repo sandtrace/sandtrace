@@ -190,7 +190,7 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
                     | "logs"
                     | "storage"
                     | "public"
-            )
+            ) && !is_generated_cache_dir(entry)
         })
         .build()
         .filter_map(|e| e.ok())
@@ -198,6 +198,22 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
         .map(|e| e.into_path())
         .filter(|p| is_scannable(p))
         .collect()
+}
+
+/// Check if a directory entry is a tool-generated cache directory that should be skipped.
+/// Only skips `cache` directories when nested under known tool/build paths (e.g. `tmp/phpstan/cache`,
+/// `bootstrap/cache`), not standalone `cache/` directories that might contain real code.
+fn is_generated_cache_dir(entry: &ignore::DirEntry) -> bool {
+    if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    if name != "cache" {
+        return false;
+    }
+    // Skip cache dirs under known tool/build parent paths
+    let path_str = entry.path().to_string_lossy();
+    path_str.contains("/tmp/") || path_str.contains("/bootstrap/") || path_str.contains("/var/")
 }
 
 fn is_scannable(path: &Path) -> bool {
@@ -335,7 +351,7 @@ fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
             "tool": {
                 "driver": {
                     "name": "sandtrace",
-                    "version": "0.2.6",
+                    "version": "0.2.8",
                     "informationUri": "https://github.com/example/sandtrace"
                 }
             },

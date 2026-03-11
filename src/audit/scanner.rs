@@ -38,6 +38,19 @@ const REDACTION_MARKERS: &[&str] = &[
     "dummy-token",
     "fake_token",
     "fake-token",
+    // Local development / test placeholders
+    "local-test",
+    "local_test",
+    "local-dev",
+    "local_dev",
+    "test-secret",
+    "test_secret",
+    "test-password",
+    "test_password",
+    "dev-secret",
+    "dev_secret",
+    "dev-password",
+    "dev_password",
     // Placeholder/dummy values
     "your-api",
     "your_api",
@@ -182,6 +195,75 @@ fn is_git_ignored(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true if the filename follows a well-known test-file naming convention.
+/// Covers Go (`_test.go`), JS/TS (`.test.js`, `.spec.tsx`), Python (`test_*.py`),
+/// Java/Kotlin (`*Test.java`, `*Test.kt`), Rust (inline `#[cfg(test)]` handled elsewhere),
+/// and PHP (`*Test.php`).
+fn is_test_file(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+
+    // Go: foo_test.go
+    if lower.ends_with("_test.go") {
+        return true;
+    }
+
+    // JS/TS: foo.test.js, foo.spec.ts, foo.test.tsx, etc.
+    let test_spec_exts = [
+        ".test.js",
+        ".test.ts",
+        ".test.jsx",
+        ".test.tsx",
+        ".test.mjs",
+        ".test.cjs",
+        ".spec.js",
+        ".spec.ts",
+        ".spec.jsx",
+        ".spec.tsx",
+        ".spec.mjs",
+        ".spec.cjs",
+    ];
+    if test_spec_exts.iter().any(|ext| lower.ends_with(ext)) {
+        return true;
+    }
+
+    // Python: test_foo.py
+    if lower.starts_with("test_") && lower.ends_with(".py") {
+        return true;
+    }
+
+    // Java/Kotlin: FooTest.java, FooTest.kt (case-sensitive check on original)
+    if (file_name.ends_with("Test.java") || file_name.ends_with("Test.kt")) && file_name.len() > 9 {
+        return true;
+    }
+
+    // PHP: FooTest.php (Pest/PHPUnit convention)
+    if file_name.ends_with("Test.php") && file_name.len() > 8 {
+        return true;
+    }
+
+    false
+}
+
+/// Returns true if a credential-pattern match contains a shell variable reference
+/// as the quoted value (e.g. `PASSWORD="$REDIS_PASSWORD"`), meaning the value is
+/// dynamic rather than hardcoded.
+fn is_shell_variable_value(matched: &str) -> bool {
+    // Find the quoted value portion: everything after the first quote character
+    if let Some(quote_pos) = matched.find('"').or_else(|| matched.find('\'')) {
+        let after_quote = &matched[quote_pos + 1..];
+        // Check if the value starts with $ followed by a letter or underscore (shell var)
+        if after_quote.starts_with('$')
+            && after_quote
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn scan_file_content(
     path: &Path,
     config: &SandtraceConfig,
@@ -196,6 +278,7 @@ pub fn scan_file_content(
     if file_path_str.contains("/test")
         || file_path_str.contains("/fixture")
         || file_path_str.contains("/example")
+        || is_test_file(file_name)
     {
         return Ok(findings);
     }
@@ -349,6 +432,12 @@ pub fn scan_file_content(
 
         for mat in regex.find_iter(&content) {
             let line_number = content[..mat.start()].lines().count();
+
+            // Skip matches where the quoted value is a shell variable reference ($VAR).
+            // Patterns like PASSWORD="$REDIS_PASSWORD" are dynamic, not hardcoded.
+            if is_shell_variable_value(mat.as_str()) {
+                continue;
+            }
 
             // Skip matches where the matched content or surrounding lines contain redaction markers.
             // Check the line at the match position and adjacent lines to handle off-by-one.
@@ -796,6 +885,115 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule_id == "cred-env-secret"),
             "Unquoted token references in source code should not trigger env-specific patterns"
+        );
+    }
+
+    #[test]
+    fn test_is_test_file_go() {
+        assert!(is_test_file("main_test.go"));
+        assert!(is_test_file("secrets_audit_test.go"));
+        assert!(!is_test_file("main.go"));
+    }
+
+    #[test]
+    fn test_is_test_file_js_ts() {
+        assert!(is_test_file("app.test.js"));
+        assert!(is_test_file("app.spec.ts"));
+        assert!(is_test_file("Component.test.tsx"));
+        assert!(!is_test_file("app.js"));
+    }
+
+    #[test]
+    fn test_is_test_file_python() {
+        assert!(is_test_file("test_auth.py"));
+        assert!(!is_test_file("auth.py"));
+    }
+
+    #[test]
+    fn test_is_test_file_java_php() {
+        assert!(is_test_file("UserTest.java"));
+        assert!(is_test_file("AuthTest.kt"));
+        assert!(is_test_file("PaymentTest.php"));
+        assert!(!is_test_file("User.java"));
+    }
+
+    #[test]
+    fn test_skip_go_test_file_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("main_test.go");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(
+            file,
+            r#"srv := &server{{authToken: "super-secret-value-here"}}"#
+        )
+        .unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.is_empty(),
+            "Test files should be skipped entirely, got {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_skip_shell_variable_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("run.sh");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, r#"REDIS_PASSWORD="$REDIS_PASSWORD""#).unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "cred-generic-password"),
+            "Shell variable references should not be flagged as hardcoded passwords"
+        );
+    }
+
+    #[test]
+    fn test_skip_shell_variable_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("run.sh");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, r#"export SECRET="$APP_SECRET""#).unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "Shell variable references should not be flagged as hardcoded secrets"
+        );
+    }
+
+    #[test]
+    fn test_skip_local_test_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("start.sh");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "export WEBHOOK_SECRET='local-test-secret'").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "Local test placeholder secrets should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_detect_real_hardcoded_password() {
+        // Ensure we still catch actual hardcoded passwords
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("config.sh");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, r#"PASSWORD="s3cureP@ssw0rd!""#).unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "cred-generic-password"),
+            "Real hardcoded passwords should still be detected"
         );
     }
 }

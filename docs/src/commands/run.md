@@ -18,11 +18,11 @@ sandtrace run --allow-net curl https://example.com             # Allow network
 | `--policy` | — | TOML policy file |
 | `--allow-path` | — | Allow filesystem access to path (repeatable) |
 | `--allow-net` | `false` | Allow network access |
-| `--allow-exec` | `false` | Allow child process execution |
+| `--allow-exec` | `false` | Accepted by the CLI; reserved for future child execution controls |
 | `-o, --output` | — | JSONL output file |
 | `--timeout` | `30` | Kill process after N seconds |
 | `--trace-only` | `false` | Disable enforcement (no Landlock/seccomp) |
-| `--follow-forks` | `true` | Trace child processes |
+| `--follow-forks` | `true` | Trace child processes (enabled by default) |
 | `--no-color` | `false` | Disable colored output |
 | `-v` / `-vv` / `-vvv` | — | Verbosity level |
 
@@ -74,14 +74,14 @@ When using `--output`, each line is a self-contained JSON object:
 ### Process lifecycle
 
 ```json
-{"event_type": "process", "action": "exec", "pid": 1234, "comm": "npm"}
-{"event_type": "process", "action": "exited", "pid": 1234, "exit_code": 0}
+{"event_type": "process", "kind": "spawned", "timestamp": "2025-01-01T12:00:00Z", "parent_pid": 1234, "child_pid": 1235}
+{"event_type": "process", "kind": "exited", "timestamp": "2025-01-01T12:00:01Z", "pid": 1234, "exit_code": 0}
 ```
 
 ### Trace summary
 
 ```json
-{"event_type": "summary", "total_syscalls": 4521, "unique_syscalls": 23, "duration_ms": 1200}
+{"event_type": "summary", "timestamp": "2025-01-01T12:00:01Z", "total_syscalls": 4521, "unique_syscalls": 23, "denied_count": 2, "process_count": 3, "duration_ms": 1200, "exit_code": 0}
 ```
 
 ## Examples

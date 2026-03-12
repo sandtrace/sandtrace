@@ -72,7 +72,13 @@ sandtrace run --allow-path ./project --output trace.jsonl npm install
 
 ## Documentation
 
-**Read the full documentation at [https://sandtrace.github.io/sandtrace/](https://sandtrace.github.io/sandtrace/)**
+Published docs are served from [https://sandtrace.github.io/sandtrace/](https://sandtrace.github.io/sandtrace/) when GitHub Pages is enabled for the repository and the `Deploy Docs` workflow succeeds.
+
+Build the docs locally with:
+
+```bash
+mdbook build docs
+```
 
 The docs cover all commands, flags, configuration, custom rules, policies, CI/CD integration, and architecture.
 

@@ -17,7 +17,7 @@ sandtrace watch --daemon --pid-file /tmp/st.pid    # Run as daemon
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--rules` | `~/.sandtrace/rules/` | YAML rules directory |
+| `--rules` | `~/.sandtrace/rules/` | Rules directory |
 | `--paths` | — | Additional paths to monitor (repeatable) |
 | `--alert` | `stdout` | Alert channel (repeatable) |
 | `--daemon` | `false` | Fork to background |

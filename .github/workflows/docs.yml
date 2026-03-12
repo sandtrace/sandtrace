@@ -1,10 +1,13 @@
 name: Deploy Docs
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - '.github/workflows/docs.yml'
+      - 'README.md'
 
 permissions:
   contents: read
@@ -21,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
       - name: Install mdBook
         run: |
           mkdir -p $HOME/.local/bin
@@ -32,7 +38,7 @@ jobs:
         run: mdbook build docs
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: docs/book
 

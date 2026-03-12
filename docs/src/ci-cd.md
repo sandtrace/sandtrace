@@ -29,7 +29,7 @@ jobs:
         run: sandtrace audit . --format sarif > sandtrace.sarif
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: sandtrace.sarif
@@ -83,27 +83,20 @@ sandtrace audit . --severity high --format terminal
 
 ## JSON output schema
 
-The JSON output is an array of finding objects:
+`sandtrace audit --format json` emits a JSON array of finding objects. Summary counts are written to `stderr`, and CI gating should use the command exit code.
 
 ```json
-{
-  "findings": [
-    {
-      "rule_id": "cred-aws-key",
-      "severity": "critical",
-      "file": "src/config.rs",
-      "line": 42,
-      "message": "AWS Access Key ID found",
-      "snippet": "AKIAIOSFODNN7EXAMPLE"
-    }
-  ],
-  "summary": {
-    "total": 1,
-    "critical": 1,
-    "high": 0,
-    "medium": 0,
-    "low": 0,
-    "info": 0
+[
+  {
+    "file_path": "src/config.rs",
+    "line_number": 42,
+    "rule_id": "cred-aws-key",
+    "severity": "critical",
+    "description": "AWS Access Key ID found",
+    "matched_pattern": "AKIA[0-9A-Z]{16}",
+    "context_lines": [
+      "const AWS_KEY = \"<redacted>\";"
+    ]
   }
-}
+]
 ```

@@ -5,6 +5,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
+use deadpool_postgres::{
+    Manager, ManagerConfig as PgManagerConfig, Pool, RecyclingMethod, Runtime,
+};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
@@ -15,6 +18,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{NoTls, Row};
 use ulid::Ulid;
 
 #[derive(Clone)]
@@ -393,7 +398,44 @@ struct OsvCacheStats {
 
 #[derive(Clone)]
 struct MetadataStore {
-    client: Arc<tokio_postgres::Client>,
+    client: Arc<DbClient>,
+}
+
+#[derive(Clone)]
+struct DbClient {
+    pool: Pool,
+}
+
+impl DbClient {
+    async fn batch_execute(&self, query: &str) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client.batch_execute(query).await?;
+        Ok(())
+    }
+
+    async fn execute(&self, query: &str, params: &[&(dyn ToSql + Sync)]) -> anyhow::Result<u64> {
+        let client = self.pool.get().await?;
+        Ok(client.execute(query, params).await?)
+    }
+
+    async fn query(&self, query: &str, params: &[&(dyn ToSql + Sync)]) -> anyhow::Result<Vec<Row>> {
+        let client = self.pool.get().await?;
+        Ok(client.query(query, params).await?)
+    }
+
+    async fn query_one(&self, query: &str, params: &[&(dyn ToSql + Sync)]) -> anyhow::Result<Row> {
+        let client = self.pool.get().await?;
+        Ok(client.query_one(query, params).await?)
+    }
+
+    async fn query_opt(
+        &self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> anyhow::Result<Option<Row>> {
+        let client = self.pool.get().await?;
+        Ok(client.query_opt(query, params).await?)
+    }
 }
 
 impl MetadataStore {
@@ -402,16 +444,21 @@ impl MetadataStore {
             return Ok(None);
         };
 
-        let (client, connection) =
-            tokio_postgres::connect(&database_url, tokio_postgres::NoTls).await?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                log::error!("sandtrace-ingest postgres connection error: {error}");
-            }
-        });
+        let config: tokio_postgres::Config = database_url.parse()?;
+        let manager = Manager::from_config(
+            config,
+            NoTls,
+            PgManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
+        );
+        let pool = Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .max_size(16)
+            .build()?;
 
         let store = Self {
-            client: Arc::new(client),
+            client: Arc::new(DbClient { pool }),
         };
         store.ensure_schema().await?;
         Ok(Some(store))

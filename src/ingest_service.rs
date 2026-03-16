@@ -95,8 +95,11 @@ impl PayloadStore {
         };
         let bucket = bucket.trim().to_string();
 
-        let endpoint = std::env::var("SANDTRACE_OBJECT_STORAGE_ENDPOINT")
-            .map_err(|_| anyhow::anyhow!("SANDTRACE_OBJECT_STORAGE_ENDPOINT is required when object storage is enabled"))?;
+        let endpoint = std::env::var("SANDTRACE_OBJECT_STORAGE_ENDPOINT").map_err(|_| {
+            anyhow::anyhow!(
+                "SANDTRACE_OBJECT_STORAGE_ENDPOINT is required when object storage is enabled"
+            )
+        })?;
         let endpoint = endpoint.trim().to_string();
         let access_key_id = std::env::var("SANDTRACE_OBJECT_STORAGE_ACCESS_KEY_ID")
             .map_err(|_| anyhow::anyhow!("SANDTRACE_OBJECT_STORAGE_ACCESS_KEY_ID is required when object storage is enabled"))?;
@@ -175,14 +178,14 @@ impl PayloadStore {
     ) -> std::io::Result<Value> {
         match self {
             Self::Filesystem { root } => {
-                let path = payload_path
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join(org_key).join(kind).join(format!("{record_id}.json")));
+                let path = payload_path.map(PathBuf::from).unwrap_or_else(|| {
+                    root.join(org_key)
+                        .join(kind)
+                        .join(format!("{record_id}.json"))
+                });
                 read_json_file(&path).await
             }
-            Self::ObjectStorage {
-                prefix, store, ..
-            } => {
+            Self::ObjectStorage { prefix, store, .. } => {
                 let key = payload_path
                     .and_then(parse_object_storage_key)
                     .unwrap_or_else(|| {
@@ -781,7 +784,8 @@ impl MetadataStore {
             }
         };
 
-        let project_key = if let Some(project_slug) = project_slug.filter(|value| !value.is_empty()) {
+        let project_key = if let Some(project_slug) = project_slug.filter(|value| !value.is_empty())
+        {
             let row = self
                 .client
                 .query_opt(
@@ -858,7 +862,11 @@ impl MetadataStore {
                     VALUES ($1, $2, $3)
                     ON CONFLICT (org_slug, project_slug) DO NOTHING
                     "#,
-                    &[&principal.org_slug, &project_slug, &generate_lowercase_ulid()],
+                    &[
+                        &principal.org_slug,
+                        &project_slug,
+                        &generate_lowercase_ulid(),
+                    ],
                 )
                 .await?;
         }
@@ -1605,7 +1613,10 @@ pub fn app(state: IngestState) -> Router {
         .route("/v1/sbom/diff", get(sbom_diff))
         .route("/v1/sbom/alerts", get(sbom_alerts))
         .route("/v1/sbom/advisories", get(sbom_advisories))
-        .route("/v1/sbom/security-alerts/history", get(sbom_security_alert_history))
+        .route(
+            "/v1/sbom/security-alerts/history",
+            get(sbom_security_alert_history),
+        )
         .route("/v1/sbom/security-alerts", get(sbom_security_alerts))
         .route("/v1/dashboard/overview", get(dashboard_overview))
         .with_state(state)
@@ -2130,7 +2141,10 @@ async fn projects_overview(
                 Ok(alerts) => {
                     for alert in alerts {
                         let to_id = string_field(&alert, "to_sbom_id");
-                        security_alerts_by_to_id.entry(to_id).or_default().push(alert);
+                        security_alerts_by_to_id
+                            .entry(to_id)
+                            .or_default()
+                            .push(alert);
                     }
                 }
                 Err(error) => {
@@ -2164,13 +2178,19 @@ async fn projects_overview(
         project["audit_uploads"] = json!(project["audit_uploads"].as_u64().unwrap_or(0) + 1);
         project["total_findings"] = json!(
             project["total_findings"].as_u64().unwrap_or(0)
-                + record.get("finding_total").and_then(Value::as_u64).unwrap_or(0)
+                + record
+                    .get("finding_total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
         );
-        if string_field(record, "uploaded_at") > string_field(&project["latest_audit"], "uploaded_at") {
+        if string_field(record, "uploaded_at")
+            > string_field(&project["latest_audit"], "uploaded_at")
+        {
             project["latest_audit"] = record.clone();
         }
         if string_field(record, "uploaded_at") > string_field(project, "latest_activity_at") {
-            project["latest_activity_at"] = record.get("uploaded_at").cloned().unwrap_or(Value::Null);
+            project["latest_activity_at"] =
+                record.get("uploaded_at").cloned().unwrap_or(Value::Null);
         }
     }
 
@@ -2192,11 +2212,13 @@ async fn projects_overview(
             })
         });
         project["run_uploads"] = json!(project["run_uploads"].as_u64().unwrap_or(0) + 1);
-        if string_field(record, "uploaded_at") > string_field(&project["latest_run"], "uploaded_at") {
+        if string_field(record, "uploaded_at") > string_field(&project["latest_run"], "uploaded_at")
+        {
             project["latest_run"] = record.clone();
         }
         if string_field(record, "uploaded_at") > string_field(project, "latest_activity_at") {
-            project["latest_activity_at"] = record.get("uploaded_at").cloned().unwrap_or(Value::Null);
+            project["latest_activity_at"] =
+                record.get("uploaded_at").cloned().unwrap_or(Value::Null);
         }
     }
 
@@ -2219,11 +2241,14 @@ async fn projects_overview(
             })
         });
         project["sbom_uploads"] = json!(project["sbom_uploads"].as_u64().unwrap_or(0) + 1);
-        if string_field(record, "uploaded_at") > string_field(&project["latest_sbom"], "uploaded_at") {
+        if string_field(record, "uploaded_at")
+            > string_field(&project["latest_sbom"], "uploaded_at")
+        {
             project["latest_sbom"] = record.clone();
         }
         if string_field(record, "uploaded_at") > string_field(project, "latest_activity_at") {
-            project["latest_activity_at"] = record.get("uploaded_at").cloned().unwrap_or(Value::Null);
+            project["latest_activity_at"] =
+                record.get("uploaded_at").cloned().unwrap_or(Value::Null);
         }
         sbom_projects.entry(project_slug).or_default().push(record);
     }
@@ -2240,21 +2265,24 @@ async fn projects_overview(
             .copied()
             .find(|candidate| candidate.get("git_commit") != latest.get("git_commit"));
         let package_alerts = match previous {
-            Some(from_record) => match build_sbom_alerts_for_pair(&state, &principal, from_record, latest).await {
-                Ok(alerts) => alerts,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to build project sbom alerts: {error}"),
-                    )
+            Some(from_record) => {
+                match build_sbom_alerts_for_pair(&state, &principal, from_record, latest).await {
+                    Ok(alerts) => alerts,
+                    Err(error) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("failed to build project sbom alerts: {error}"),
+                        )
+                    }
                 }
-            },
+            }
             None => Vec::new(),
         };
         let security_alerts = if let Some(alerts) = security_alerts_by_to_id.get(&latest_id) {
             alerts.clone()
         } else if let Some(from_record) = previous {
-            match build_sbom_security_alerts_for_pair(&state, &principal, from_record, latest).await {
+            match build_sbom_security_alerts_for_pair(&state, &principal, from_record, latest).await
+            {
                 Ok((alerts, _)) => alerts,
                 Err(error) => {
                     return error_response(
@@ -2277,7 +2305,9 @@ async fn projects_overview(
     items.sort_by(|left, right| {
         string_field(right, "latest_activity_at")
             .cmp(&string_field(left, "latest_activity_at"))
-            .then_with(|| string_field(left, "project_slug").cmp(&string_field(right, "project_slug")))
+            .then_with(|| {
+                string_field(left, "project_slug").cmp(&string_field(right, "project_slug"))
+            })
     });
     items.truncate(limit);
 
@@ -2497,7 +2527,10 @@ async fn sbom_diff(
     let mut unchanged_count = 0u64;
 
     for identity in all_identities {
-        match (from_by_identity.get(&identity), to_by_identity.get(&identity)) {
+        match (
+            from_by_identity.get(&identity),
+            to_by_identity.get(&identity),
+        ) {
             (Some(from_package), Some(to_package)) => {
                 if from_package.version == to_package.version {
                     unchanged_count += 1;
@@ -2594,9 +2627,7 @@ async fn sbom_alerts(
         .count();
     let version_change_count = alerts
         .iter()
-        .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str) == Some("direct_version_change")
-        })
+        .filter(|alert| alert.get("kind").and_then(Value::as_str) == Some("direct_version_change"))
         .count();
 
     Json(json!({
@@ -2674,25 +2705,26 @@ async fn sbom_advisories(
         })
         .collect::<Vec<_>>();
     let query_limit = params.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let (advisory_results, cache_stats) = match query_osv_advisories(
-        &state,
-        &filtered_packages,
-        query_limit,
-    )
-    .await
-    {
-        Ok(results) => results,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("failed to query OSV: {error}"),
-            )
-        }
-    };
+    let (advisory_results, cache_stats) =
+        match query_osv_advisories(&state, &filtered_packages, query_limit).await {
+            Ok(results) => results,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("failed to query OSV: {error}"),
+                )
+            }
+        };
 
     let affected_package_count = advisory_results
         .iter()
-        .filter(|package| package.get("vulnerability_count").and_then(Value::as_u64).unwrap_or(0) > 0)
+        .filter(|package| {
+            package
+                .get("vulnerability_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        })
         .count();
     let vulnerability_count: usize = advisory_results
         .iter()
@@ -2760,22 +2792,18 @@ async fn sbom_security_alerts(
         }
     };
     let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
-    let (alerts, cache_stats) = match load_or_build_recent_sbom_security_alerts(
-        &state,
-        &principal,
-        &sbom_records,
-        limit,
-    )
-    .await
-    {
-        Ok(alerts) => alerts,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("failed to build sbom security alerts: {error}"),
-            )
-        }
-    };
+    let (alerts, cache_stats) =
+        match load_or_build_recent_sbom_security_alerts(&state, &principal, &sbom_records, limit)
+            .await
+        {
+            Ok(alerts) => alerts,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("failed to build sbom security alerts: {error}"),
+                )
+            }
+        };
 
     let new_vulnerable_direct_package_count = alerts
         .iter()
@@ -2786,8 +2814,7 @@ async fn sbom_security_alerts(
     let vulnerable_direct_version_change_count = alerts
         .iter()
         .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str)
-                == Some("vulnerable_direct_version_change")
+            alert.get("kind").and_then(Value::as_str) == Some("vulnerable_direct_version_change")
         })
         .count();
 
@@ -3042,7 +3069,10 @@ async fn sbom_timeline(
                 Ok(alerts) => {
                     for alert in alerts {
                         let to_id = string_field(&alert, "to_sbom_id");
-                        security_alerts_by_to_id.entry(to_id).or_default().push(alert);
+                        security_alerts_by_to_id
+                            .entry(to_id)
+                            .or_default()
+                            .push(alert);
                     }
                 }
                 Err(error) => {
@@ -3074,15 +3104,18 @@ async fn sbom_timeline(
                 .copied()
                 .find(|candidate| candidate.get("git_commit") != record.get("git_commit"));
             let package_alerts = match from_record {
-                Some(from_record) => match build_sbom_alerts_for_pair(&state, &principal, from_record, record).await {
-                    Ok(alerts) => alerts,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("failed to build sbom timeline alerts: {error}"),
-                        )
+                Some(from_record) => {
+                    match build_sbom_alerts_for_pair(&state, &principal, from_record, record).await
+                    {
+                        Ok(alerts) => alerts,
+                        Err(error) => {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &format!("failed to build sbom timeline alerts: {error}"),
+                            )
+                        }
                     }
-                },
+                }
                 None => Vec::new(),
             };
             let security_alerts = if let Some(alerts) = security_alerts_by_to_id
@@ -3090,7 +3123,8 @@ async fn sbom_timeline(
             {
                 alerts.clone()
             } else if let Some(from_record) = from_record {
-                match build_sbom_security_alerts_for_pair(&state, &principal, from_record, record).await
+                match build_sbom_security_alerts_for_pair(&state, &principal, from_record, record)
+                    .await
                 {
                     Ok((alerts, _)) => alerts,
                     Err(error) => {
@@ -3106,11 +3140,15 @@ async fn sbom_timeline(
 
             let new_direct_package_count = package_alerts
                 .iter()
-                .filter(|alert| alert.get("kind").and_then(Value::as_str) == Some("new_direct_package"))
+                .filter(|alert| {
+                    alert.get("kind").and_then(Value::as_str) == Some("new_direct_package")
+                })
                 .count();
             let direct_version_change_count = package_alerts
                 .iter()
-                .filter(|alert| alert.get("kind").and_then(Value::as_str) == Some("direct_version_change"))
+                .filter(|alert| {
+                    alert.get("kind").and_then(Value::as_str) == Some("direct_version_change")
+                })
                 .count();
             let new_vulnerable_direct_package_count = security_alerts
                 .iter()
@@ -3161,11 +3199,21 @@ async fn sbom_timeline(
         .len();
     let package_alert_count: usize = commits
         .iter()
-        .map(|record| record.get("package_alert_count").and_then(Value::as_u64).unwrap_or(0) as usize)
+        .map(|record| {
+            record
+                .get("package_alert_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        })
         .sum();
     let security_alert_count: usize = commits
         .iter()
-        .map(|record| record.get("security_alert_count").and_then(Value::as_u64).unwrap_or(0) as usize)
+        .map(|record| {
+            record
+                .get("security_alert_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        })
         .sum();
 
     Json(json!({
@@ -3293,18 +3341,20 @@ async fn dashboard_overview(
             }
         }
     }
-    let recent_sbom_alerts = match build_recent_sbom_alerts(&state, &principal, &sbom_records, limit).await
-    {
-        Ok(alerts) => alerts,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to build sbom alerts: {error}"),
-            )
-        }
-    };
+    let recent_sbom_alerts =
+        match build_recent_sbom_alerts(&state, &principal, &sbom_records, limit).await {
+            Ok(alerts) => alerts,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to build sbom alerts: {error}"),
+                )
+            }
+        };
     let (recent_sbom_security_alerts, security_alert_cache_stats, security_alert_error) =
-        match load_or_build_recent_sbom_security_alerts(&state, &principal, &sbom_records, limit).await {
+        match load_or_build_recent_sbom_security_alerts(&state, &principal, &sbom_records, limit)
+            .await
+        {
             Ok((alerts, stats)) => (alerts, stats, None),
             Err(error) => (
                 Vec::new(),
@@ -3318,22 +3368,18 @@ async fn dashboard_overview(
         .count();
     let direct_version_change_count = recent_sbom_alerts
         .iter()
-        .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str) == Some("direct_version_change")
-        })
+        .filter(|alert| alert.get("kind").and_then(Value::as_str) == Some("direct_version_change"))
         .count();
     let new_vulnerable_direct_package_count = recent_sbom_security_alerts
         .iter()
         .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str)
-                == Some("new_vulnerable_direct_package")
+            alert.get("kind").and_then(Value::as_str) == Some("new_vulnerable_direct_package")
         })
         .count();
     let vulnerable_direct_version_change_count = recent_sbom_security_alerts
         .iter()
         .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str)
-                == Some("vulnerable_direct_version_change")
+            alert.get("kind").and_then(Value::as_str) == Some("vulnerable_direct_version_change")
         })
         .count();
 
@@ -4245,15 +4291,32 @@ fn sbom_security_alert_matches_filters(
     package_identity: Option<&str>,
 ) -> bool {
     project_slug.is_none_or(|expected| {
-        alert.get("project_slug").and_then(Value::as_str).unwrap_or_default() == expected
+        alert
+            .get("project_slug")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            == expected
     }) && kind.is_none_or(|expected| {
-        alert.get("kind").and_then(Value::as_str).unwrap_or_default() == expected
+        alert
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            == expected
     }) && from_git_commit.is_none_or(|expected| {
-        alert.get("from_git_commit").and_then(Value::as_str).unwrap_or_default() == expected
+        alert
+            .get("from_git_commit")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            == expected
     }) && to_git_commit.is_none_or(|expected| {
-        alert.get("to_git_commit").and_then(Value::as_str).unwrap_or_default() == expected
+        alert
+            .get("to_git_commit")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            == expected
     }) && package_identity.is_none_or(|expected| {
-        alert.pointer("/package/identity")
+        alert
+            .pointer("/package/identity")
             .and_then(Value::as_str)
             .unwrap_or_default()
             == expected
@@ -4270,14 +4333,14 @@ fn summarize_sbom_security_alerts(alerts: &[Value], cache_stats: Option<OsvCache
     let vulnerable_direct_version_change_count = alerts
         .iter()
         .filter(|alert| {
-            alert.get("kind").and_then(Value::as_str)
-                == Some("vulnerable_direct_version_change")
+            alert.get("kind").and_then(Value::as_str) == Some("vulnerable_direct_version_change")
         })
         .count();
     let affected_package_count = alerts
         .iter()
         .filter_map(|alert| {
-            alert.pointer("/package/identity")
+            alert
+                .pointer("/package/identity")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         })
@@ -4360,8 +4423,9 @@ async fn build_recent_sbom_alerts(
             .cmp(&string_field(left, "uploaded_at"))
             .then_with(|| string_field(left, "kind").cmp(&string_field(right, "kind")))
             .then_with(|| {
-                string_field(left.get("package").unwrap_or(&Value::Null), "name")
-                    .cmp(&string_field(right.get("package").unwrap_or(&Value::Null), "name"))
+                string_field(left.get("package").unwrap_or(&Value::Null), "name").cmp(
+                    &string_field(right.get("package").unwrap_or(&Value::Null), "name"),
+                )
             })
     });
     alerts.truncate(limit);
@@ -4400,7 +4464,9 @@ async fn build_sbom_alerts_for_pair(
                 "uploaded_at": to_record.get("uploaded_at").cloned().unwrap_or(Value::Null),
                 "package": sbom_package_json(to_package),
             })),
-            Some(from_package) if to_package.direct && from_package.version != to_package.version => {
+            Some(from_package)
+                if to_package.direct && from_package.version != to_package.version =>
+            {
                 alerts.push(json!({
                     "kind": "direct_version_change",
                     "project_slug": to_record.get("project_slug").cloned().unwrap_or(Value::Null),
@@ -4429,8 +4495,9 @@ async fn build_sbom_alerts_for_pair(
             .cmp(&string_field(left, "uploaded_at"))
             .then_with(|| string_field(left, "kind").cmp(&string_field(right, "kind")))
             .then_with(|| {
-                string_field(left.get("package").unwrap_or(&Value::Null), "name")
-                    .cmp(&string_field(right.get("package").unwrap_or(&Value::Null), "name"))
+                string_field(left.get("package").unwrap_or(&Value::Null), "name").cmp(
+                    &string_field(right.get("package").unwrap_or(&Value::Null), "name"),
+                )
             })
     });
     Ok(alerts)
@@ -4481,8 +4548,9 @@ async fn build_recent_sbom_security_alerts(
             .cmp(&string_field(left, "uploaded_at"))
             .then_with(|| string_field(left, "kind").cmp(&string_field(right, "kind")))
             .then_with(|| {
-                string_field(left.get("package").unwrap_or(&Value::Null), "name")
-                    .cmp(&string_field(right.get("package").unwrap_or(&Value::Null), "name"))
+                string_field(left.get("package").unwrap_or(&Value::Null), "name").cmp(
+                    &string_field(right.get("package").unwrap_or(&Value::Null), "name"),
+                )
             })
     });
     alerts.truncate(limit);
@@ -4641,13 +4709,17 @@ async fn build_sbom_security_alerts_for_pair(
 
     let relevant_packages = to_by_identity
         .iter()
-        .filter_map(|(identity, to_package)| match from_by_identity.get(identity) {
-            None if to_package.direct => Some(to_package.clone()),
-            Some(from_package) if to_package.direct && from_package.version != to_package.version => {
-                Some(to_package.clone())
-            }
-            _ => None,
-        })
+        .filter_map(
+            |(identity, to_package)| match from_by_identity.get(identity) {
+                None if to_package.direct => Some(to_package.clone()),
+                Some(from_package)
+                    if to_package.direct && from_package.version != to_package.version =>
+                {
+                    Some(to_package.clone())
+                }
+                _ => None,
+            },
+        )
         .collect::<Vec<_>>();
     if relevant_packages.is_empty() {
         return Ok((Vec::new(), OsvCacheStats::default()));
@@ -4684,7 +4756,9 @@ async fn build_sbom_security_alerts_for_pair(
                 "uploaded_at": to_record.get("uploaded_at").cloned().unwrap_or(Value::Null),
                 "package": advisory,
             })),
-            Some(from_package) if to_package.direct && from_package.version != to_package.version => {
+            Some(from_package)
+                if to_package.direct && from_package.version != to_package.version =>
+            {
                 alerts.push(json!({
                     "kind": "vulnerable_direct_version_change",
                     "project_slug": to_record.get("project_slug").cloned().unwrap_or(Value::Null),
@@ -4715,8 +4789,9 @@ async fn build_sbom_security_alerts_for_pair(
             .cmp(&string_field(left, "uploaded_at"))
             .then_with(|| string_field(left, "kind").cmp(&string_field(right, "kind")))
             .then_with(|| {
-                string_field(left.get("package").unwrap_or(&Value::Null), "name")
-                    .cmp(&string_field(right.get("package").unwrap_or(&Value::Null), "name"))
+                string_field(left.get("package").unwrap_or(&Value::Null), "name").cmp(
+                    &string_field(right.get("package").unwrap_or(&Value::Null), "name"),
+                )
             })
     });
     Ok((alerts, cache_stats))
@@ -4865,10 +4940,7 @@ fn strip_purl_version(purl: &str) -> String {
         .split_once('?')
         .map(|(base, query)| (base, Some(query)))
         .unwrap_or((without_fragment, None));
-    let stripped_base = base
-        .rfind('@')
-        .map(|index| &base[..index])
-        .unwrap_or(base);
+    let stripped_base = base.rfind('@').map(|index| &base[..index]).unwrap_or(base);
 
     match query {
         Some(query) => format!("{stripped_base}?{query}"),
@@ -4883,20 +4955,22 @@ fn osv_query_key(package: &SbomPackage) -> String {
 }
 
 fn osv_ecosystem(ecosystem: &str) -> Option<String> {
-    Some(match ecosystem {
-        "cargo" => "crates.io",
-        "npm" => "npm",
-        "pypi" => "PyPI",
-        "golang" => "Go",
-        "nuget" => "NuGet",
-        "gem" => "RubyGems",
-        "composer" => "Packagist",
-        "maven" => "Maven",
-        "hex" => "Hex",
-        other if !other.is_empty() => other,
-        _ => return None,
-    }
-    .to_string())
+    Some(
+        match ecosystem {
+            "cargo" => "crates.io",
+            "npm" => "npm",
+            "pypi" => "PyPI",
+            "golang" => "Go",
+            "nuget" => "NuGet",
+            "gem" => "RubyGems",
+            "composer" => "Packagist",
+            "maven" => "Maven",
+            "hex" => "Hex",
+            other if !other.is_empty() => other,
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn resolve_sbom_record<'a>(
@@ -4929,7 +5003,10 @@ fn resolve_sbom_base_record<'a>(
         return Some(record);
     }
 
-    let to_id = to_record.get("id").and_then(Value::as_str).unwrap_or_default();
+    let to_id = to_record
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let to_commit = to_record
         .get("git_commit")
         .and_then(Value::as_str)
@@ -5187,9 +5264,7 @@ mod tests {
                 async move { Json(response) }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -5714,7 +5789,10 @@ mod tests {
         let inventory: Value = serde_json::from_slice(&inventory_body).unwrap();
 
         assert_eq!(inventory["summary"]["package_count"].as_u64(), Some(2));
-        assert_eq!(inventory["summary"]["direct_package_count"].as_u64(), Some(2));
+        assert_eq!(
+            inventory["summary"]["direct_package_count"].as_u64(),
+            Some(2)
+        );
         assert_eq!(inventory["packages"].as_array().unwrap().len(), 2);
         assert_eq!(inventory["packages"][0]["ecosystem"].as_str(), Some("npm"));
         assert_eq!(inventory["packages"][1]["ecosystem"].as_str(), Some("pypi"));
@@ -5981,8 +6059,14 @@ mod tests {
             alerts["summary"]["direct_version_change_count"].as_u64(),
             Some(1)
         );
-        assert_eq!(alerts["alerts"][0]["kind"].as_str(), Some("direct_version_change"));
-        assert_eq!(alerts["alerts"][1]["kind"].as_str(), Some("new_direct_package"));
+        assert_eq!(
+            alerts["alerts"][0]["kind"].as_str(),
+            Some("direct_version_change")
+        );
+        assert_eq!(
+            alerts["alerts"][1]["kind"].as_str(),
+            Some("new_direct_package")
+        );
 
         let overview_request = Request::builder()
             .uri("/v1/dashboard/overview?limit=10")
@@ -6424,7 +6508,10 @@ mod tests {
 
         assert_eq!(history["filters"]["storage_mode"].as_str(), Some("derived"));
         assert_eq!(history["summary"]["alert_count"].as_u64(), Some(1));
-        assert_eq!(history["summary"]["affected_package_count"].as_u64(), Some(1));
+        assert_eq!(
+            history["summary"]["affected_package_count"].as_u64(),
+            Some(1)
+        );
         assert_eq!(
             history["alerts"][0]["kind"].as_str(),
             Some("vulnerable_direct_version_change")
@@ -6581,13 +6668,34 @@ mod tests {
 
         assert_eq!(timeline["summary"]["commit_count"].as_u64(), Some(2));
         assert_eq!(timeline["summary"]["package_alert_count"].as_u64(), Some(2));
-        assert_eq!(timeline["summary"]["security_alert_count"].as_u64(), Some(1));
-        assert_eq!(timeline["commits"][0]["git_commit"].as_str(), Some("def456"));
-        assert_eq!(timeline["commits"][0]["package_alert_count"].as_u64(), Some(2));
-        assert_eq!(timeline["commits"][0]["security_alert_count"].as_u64(), Some(1));
-        assert_eq!(timeline["commits"][1]["git_commit"].as_str(), Some("abc123"));
-        assert_eq!(timeline["commits"][1]["package_alert_count"].as_u64(), Some(0));
-        assert_eq!(timeline["commits"][1]["security_alert_count"].as_u64(), Some(0));
+        assert_eq!(
+            timeline["summary"]["security_alert_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            timeline["commits"][0]["git_commit"].as_str(),
+            Some("def456")
+        );
+        assert_eq!(
+            timeline["commits"][0]["package_alert_count"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            timeline["commits"][0]["security_alert_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            timeline["commits"][1]["git_commit"].as_str(),
+            Some("abc123")
+        );
+        assert_eq!(
+            timeline["commits"][1]["package_alert_count"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            timeline["commits"][1]["security_alert_count"].as_u64(),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -6754,7 +6862,11 @@ mod tests {
 
         let response = app
             .clone()
-            .oneshot(auth_request_with_token("/v1/ingest/audit", "ops-key", ops_audit_payload))
+            .oneshot(auth_request_with_token(
+                "/v1/ingest/audit",
+                "ops-key",
+                ops_audit_payload,
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -6773,7 +6885,10 @@ mod tests {
         let overview: Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(overview["summary"]["project_count"].as_u64(), Some(1));
-        assert_eq!(overview["projects"][0]["project_slug"].as_str(), Some("web"));
+        assert_eq!(
+            overview["projects"][0]["project_slug"].as_str(),
+            Some("web")
+        );
         assert_eq!(overview["projects"][0]["audit_uploads"].as_u64(), Some(1));
         assert_eq!(overview["projects"][0]["run_uploads"].as_u64(), Some(1));
         assert_eq!(overview["projects"][0]["sbom_uploads"].as_u64(), Some(2));

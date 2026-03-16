@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Rust 1.75+** (for building from source)
+- **Rust 1.87+** (for building from source)
 - **Linux 5.13+** (Landlock v1 support for `sandtrace run`)
 - **Linux 5.3+** (PTRACE_GET_SYSCALL_INFO for `sandtrace run`)
 

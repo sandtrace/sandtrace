@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sandtrace_ingest
+      POSTGRES_USER: sandtrace
+      POSTGRES_PASSWORD: sandtrace
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandtrace -d sandtrace_ingest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    volumes:
+      - sandtrace-postgres-data:/var/lib/postgresql/data
+
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SANDTRACE_INGEST_ADMIN_TOKEN: dev-admin-token
+      SANDTRACE_INGEST_BIND: 0.0.0.0:8080
+      SANDTRACE_INGEST_DIR: /var/lib/sandtrace-ingest
+      SANDTRACE_INGEST_DATABASE_URL: postgres://sandtrace:sandtrace@postgres:5432/sandtrace_ingest
+      SANDTRACE_INGEST_KEYS_FILE: /app/examples/ingest-principals.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - sandtrace-ingest-data:/var/lib/sandtrace-ingest
+
+volumes:
+  sandtrace-postgres-data:
+  sandtrace-ingest-data:

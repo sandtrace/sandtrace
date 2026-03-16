@@ -29,7 +29,7 @@ Requires `inotify` support (available in all modern Linux kernels).
 
 ### sandtrace audit / sandtrace scan
 
-No special kernel requirements. Works on any Linux system with Rust 1.75+.
+No special kernel requirements. Works on any Linux system with Rust 1.87+.
 
 ## Limitations
 

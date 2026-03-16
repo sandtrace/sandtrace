@@ -2,6 +2,7 @@ pub mod obfuscation;
 pub mod scanner;
 
 use crate::cli::AuditArgs;
+use crate::cloud;
 use crate::config::{self, SandtraceConfig};
 use crate::error::SandtraceError;
 use crate::event::{AuditFinding, Severity};
@@ -10,17 +11,19 @@ use colored::Colorize;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-pub fn run_audit(args: AuditArgs) -> Result<(), SandtraceError> {
+pub fn run_audit(args: AuditArgs) -> Result<i32, SandtraceError> {
     run_audit_with_config(args, &config::load_config())
 }
 
 pub fn run_audit_with_config(
     args: AuditArgs,
     config: &SandtraceConfig,
-) -> Result<(), SandtraceError> {
+) -> Result<i32, SandtraceError> {
     args.validate()
         .map_err(|e| SandtraceError::InvalidArgument(e.to_string()))?;
+    let started = Instant::now();
 
     // Load rules
     let mut registry = RuleRegistry::new();
@@ -136,13 +139,25 @@ pub fn run_audit_with_config(
         high_count
     );
 
-    if critical_count > 0 {
-        std::process::exit(2);
-    } else if high_count > 0 {
-        std::process::exit(1);
+    if let Some(cloud_config) = cloud::CloudConfig::from_env() {
+        if let Err(error) = cloud::upload_audit(
+            &cloud_config,
+            &args,
+            &findings,
+            files.len(),
+            started.elapsed().as_millis() as u64,
+        ) {
+            eprintln!("Warning: failed to upload audit results to Sandtrace Cloud: {error}");
+        }
     }
 
-    Ok(())
+    if critical_count > 0 {
+        return Ok(2);
+    } else if high_count > 0 {
+        return Ok(1);
+    }
+
+    Ok(0)
 }
 
 fn collect_files(dir: &Path) -> Vec<PathBuf> {

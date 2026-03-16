@@ -37,6 +37,7 @@ pub struct Tracer {
     follow_forks: bool,
     stats: TraceStats,
     shutdown: Arc<AtomicBool>,
+    last_summary: Option<TraceSummary>,
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +67,7 @@ impl Tracer {
             follow_forks: args.follow_forks,
             stats: TraceStats::default(),
             shutdown,
+            last_summary: None,
         })
     }
 
@@ -82,6 +84,10 @@ impl Tracer {
             }
             Err(e) => Err(crate::error::SandboxError::Fork(e).into()),
         }
+    }
+
+    pub fn last_summary(&self) -> Option<&TraceSummary> {
+        self.last_summary.as_ref()
     }
 
     fn run_child(&self) -> ! {
@@ -400,6 +406,7 @@ impl Tracer {
             suspicious_activity: self.stats.suspicious_activity.clone(),
         };
 
+        self.last_summary = Some(summary.clone());
         let _ = self.output.emit_event(TraceEvent::Summary(summary));
         let _ = self.output.flush();
     }

@@ -1,3 +1,5 @@
 /target
 /docs/book
 tests/fixtures/binaries/target
+/logs
+/var

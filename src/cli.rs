@@ -28,6 +28,9 @@ pub enum Commands {
 
     /// Scan filesystem for whitespace obfuscation (wormsign detection)
     Scan(ScanArgs),
+
+    /// Generate an SBOM for a project or monorepo
+    Sbom(SbomArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -169,6 +172,25 @@ pub struct ScanArgs {
     pub no_color: bool,
 }
 
+#[derive(Parser, Debug)]
+pub struct SbomArgs {
+    /// Directory to inspect for manifests and lockfiles
+    #[arg(required = true)]
+    pub target: PathBuf,
+
+    /// Output format
+    #[arg(long, value_enum, default_value = "cyclonedx-json")]
+    pub format: SbomFormat,
+
+    /// Write output to a file instead of stdout
+    #[arg(short, long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Compact JSON output
+    #[arg(long)]
+    pub no_pretty: bool,
+}
+
 fn default_scan_target() -> String {
     std::env::var("HOME").unwrap_or_else(|_| ".".into())
 }
@@ -187,6 +209,11 @@ pub enum SeverityFilter {
     Medium,
     High,
     Critical,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum SbomFormat {
+    CyclonedxJson,
 }
 
 impl RunArgs {
@@ -248,6 +275,18 @@ impl AuditArgs {
             SeverityFilter::High => crate::event::Severity::High,
             SeverityFilter::Critical => crate::event::Severity::Critical,
         }
+    }
+}
+
+impl SbomArgs {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.target.exists() {
+            anyhow::bail!("Target directory does not exist: {}", self.target.display());
+        }
+        if !self.target.is_dir() {
+            anyhow::bail!("Target must be a directory: {}", self.target.display());
+        }
+        Ok(())
     }
 }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod alert;
 mod audit;
 mod cli;
+mod cloud;
 mod config;
 mod error;
 mod event;
@@ -15,6 +16,7 @@ mod policy;
 mod process;
 mod rules;
 mod sandbox;
+mod sbom;
 mod scan;
 #[cfg(feature = "telemetry")]
 mod telemetry;
@@ -48,13 +50,17 @@ fn main() -> anyhow::Result<()> {
                 .context("Watch mode failed")?;
         }
         Commands::Audit(args) => {
-            audit::run_audit(args).context("Audit failed")?;
+            let exit_code = audit::run_audit(args).context("Audit failed")?;
+            std::process::exit(exit_code);
         }
         Commands::Init(args) => {
             init::run_init(args.force).context("Init failed")?;
         }
         Commands::Scan(args) => {
             scan::run_scan(args).context("Scan failed")?;
+        }
+        Commands::Sbom(args) => {
+            sbom::run_sbom(args).context("SBOM generation failed")?;
         }
     }
 
@@ -87,6 +93,15 @@ fn run_sandbox(args: cli::RunArgs) -> anyhow::Result<()> {
     let mut tracer = Tracer::new(&args, output, shutdown).context("Failed to initialize tracer")?;
 
     let exit_code = tracer.run().context("Tracing failed")?;
+
+    if let (Some(cloud_config), Some(summary)) =
+        (cloud::CloudConfig::from_env(), tracer.last_summary())
+    {
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        if let Err(error) = cloud::upload_run(&cloud_config, &args, summary, &working_dir) {
+            eprintln!("Warning: failed to upload run results to Sandtrace Cloud: {error}");
+        }
+    }
 
     std::process::exit(exit_code);
 }

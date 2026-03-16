@@ -1,0 +1,14 @@
+[
+  {
+    "api_key": "st_dev_acme_web_123",
+    "org_slug": "acme",
+    "project_slug": "web",
+    "actor": "ci"
+  },
+  {
+    "api_key": "st_dev_other_api_456",
+    "org_slug": "other",
+    "project_slug": "api",
+    "actor": "ci"
+  }
+]

@@ -449,7 +449,7 @@ impl MetadataStore {
             config,
             NoTls,
             PgManagerConfig {
-                recycling_method: RecyclingMethod::Fast,
+                recycling_method: RecyclingMethod::Verified,
             },
         );
         let pool = Pool::builder(manager)

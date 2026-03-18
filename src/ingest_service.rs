@@ -449,7 +449,7 @@ impl MetadataStore {
             config,
             NoTls,
             PgManagerConfig {
-                recycling_method: RecyclingMethod::Fast,
+                recycling_method: RecyclingMethod::Verified,
             },
         );
         let pool = Pool::builder(manager)
@@ -3491,13 +3491,22 @@ async fn ingest(
         return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
+    let effective_project_slug = principal
+        .project_slug
+        .clone()
+        .or_else(|| infer_project_slug_from_payload(&payload));
+    let effective_principal = ApiPrincipal {
+        project_slug: effective_project_slug,
+        ..principal
+    };
+
     let upload_id = payload
         .get("upload_id")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let provisional_record_id = generate_record_id(id_prefix, upload_id);
     let provisional_index_record =
-        build_index_record(kind, &provisional_record_id, &payload, &principal);
+        build_index_record(kind, &provisional_record_id, &payload, &effective_principal);
     let record_id = if kind == "sbom" {
         deterministic_sbom_record_id(&provisional_index_record)
     } else {
@@ -3506,11 +3515,11 @@ async fn ingest(
     let index_record = if record_id == provisional_record_id {
         provisional_index_record
     } else {
-        build_index_record(kind, &record_id, &payload, &principal)
+        build_index_record(kind, &record_id, &payload, &effective_principal)
     };
 
     if kind == "sbom" {
-        match find_duplicate_sbom(&state, &principal, &index_record).await {
+        match find_duplicate_sbom(&state, &effective_principal, &index_record).await {
             Ok(Some(existing_record)) => {
                 let existing_id = existing_record
                     .get("id")
@@ -3521,9 +3530,9 @@ async fn ingest(
                     "sbom_id": existing_id,
                     "status": "duplicate",
                     "organization": {
-                        "org_slug": principal.org_slug,
-                        "project_slug": principal.project_slug,
-                        "actor": principal.actor,
+                        "org_slug": effective_principal.org_slug,
+                        "project_slug": effective_principal.project_slug,
+                        "actor": effective_principal.actor,
                     },
                     "record": existing_record,
                 }))
@@ -3541,8 +3550,8 @@ async fn ingest(
 
     match persist_payload(
         &state,
-        principal.org_slug.as_str(),
-        principal.project_slug.as_deref(),
+        effective_principal.org_slug.as_str(),
+        effective_principal.project_slug.as_deref(),
         kind,
         &record_id,
         &payload,
@@ -3552,8 +3561,12 @@ async fn ingest(
     {
         Ok(path) => {
             if kind == "sbom" {
-                if let Err(error) =
-                    persist_sbom_security_alerts_for_record(&state, &principal, &record_id).await
+                if let Err(error) = persist_sbom_security_alerts_for_record(
+                    &state,
+                    &effective_principal,
+                    &record_id,
+                )
+                .await
                 {
                     log::warn!(
                         "failed to persist sbom security alerts for {}: {}",
@@ -3568,9 +3581,9 @@ async fn ingest(
                 "status": "accepted",
                 "stored_at": path,
                 "organization": {
-                    "org_slug": principal.org_slug,
-                    "project_slug": principal.project_slug,
-                    "actor": principal.actor,
+                    "org_slug": effective_principal.org_slug,
+                    "project_slug": effective_principal.project_slug,
+                    "actor": effective_principal.actor,
                 },
                 "record": index_record,
             }))
@@ -3580,6 +3593,31 @@ async fn ingest(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("failed to persist ingest payload: {error}"),
         ),
+    }
+}
+
+fn infer_project_slug_from_payload(payload: &Value) -> Option<String> {
+    let repo_url = payload
+        .pointer("/project/repo_url")
+        .and_then(Value::as_str)?;
+    infer_project_slug_from_repo_url(repo_url)
+}
+
+fn infer_project_slug_from_repo_url(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .map(|value| value.trim_end_matches(".git"))?;
+    let slug = candidate.trim().to_lowercase();
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
     }
 }
 
@@ -5287,6 +5325,15 @@ mod tests {
                         api_key: String::from("ops-key"),
                         org_slug: String::from("acme"),
                         project_slug: Some(String::from("ops")),
+                        actor: Some(String::from("ci")),
+                    },
+                ),
+                (
+                    String::from("org-key"),
+                    ApiPrincipal {
+                        api_key: String::from("org-key"),
+                        org_slug: String::from("acme"),
+                        project_slug: None,
                         actor: Some(String::from("ci")),
                     },
                 ),
@@ -7216,5 +7263,57 @@ mod tests {
             overview["recent_audits"][0]["project_slug"].as_str(),
             Some("ops")
         );
+    }
+
+    #[test]
+    fn infer_project_slug_from_repo_url_handles_github_urls() {
+        assert_eq!(
+            infer_project_slug_from_repo_url("https://github.com/cc-consulting-nv/web.git"),
+            Some(String::from("web"))
+        );
+        assert_eq!(
+            infer_project_slug_from_repo_url("git@github.com:cc-consulting-nv/ccsdk-flutter.git"),
+            Some(String::from("ccsdk-flutter"))
+        );
+    }
+
+    #[tokio::test]
+    async fn org_scoped_keys_infer_project_slug_from_repo_url() {
+        let state = test_state();
+        let app = app(state.clone());
+
+        let payload = json!({
+            "schema_version": "2026-03-12",
+            "upload_id": "upl_org_scoped_1",
+            "uploaded_at": "2026-03-12T22:00:00Z",
+            "tool": { "command": "audit", "version": "0.3.0" },
+            "source": { "environment": "ci" },
+            "project": {
+                "git_branch": "main",
+                "git_commit": "abc123",
+                "repo_url": "https://github.com/cc-consulting-nv/web"
+            },
+            "payload": { "summary": { "total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0 } }
+        });
+
+        let response = app
+            .clone()
+            .oneshot(auth_request_with_token(
+                "/v1/ingest/audit",
+                "org-key",
+                payload,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let accepted: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            accepted["organization"]["project_slug"].as_str(),
+            Some("web")
+        );
+        assert_eq!(accepted["record"]["project_slug"].as_str(), Some("web"));
     }
 }

@@ -1,4 +1,5 @@
 use anyhow::Context;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,7 @@ struct WorkerConfig {
     sandtrace_bin: Option<PathBuf>,
     ingest_url: Option<String>,
     ingest_api_key: Option<String>,
+    git_token: Option<String>,
     git_bin: String,
     workspace_root: Option<PathBuf>,
 }
@@ -181,6 +183,11 @@ async fn main() -> anyhow::Result<()> {
         ingest_api_key: std::env::var("SANDTRACE_RUNTIME_INGEST_API_KEY")
             .ok()
             .or_else(|| std::env::var("SANDTRACE_API_KEY").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        git_token: std::env::var("SANDTRACE_RUNTIME_GITHUB_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("SANDTRACE_RUNTIME_GIT_TOKEN").ok())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         git_bin: std::env::var("SANDTRACE_RUNTIME_GIT_BIN").unwrap_or_else(|_| "git".to_string()),
@@ -466,7 +473,13 @@ async fn run_command_mode(job: &LeaseJob, config: &WorkerConfig) -> Result<Strin
     let workspace = prepare_workspace(job, config)?;
     let checkout_dir = workspace.path().join("repo");
 
-    checkout_repo(&config.git_bin, job, &checkout_dir).await?;
+    checkout_repo(
+        &config.git_bin,
+        config.git_token.as_deref(),
+        job,
+        &checkout_dir,
+    )
+    .await?;
 
     let working_directory =
         resolve_working_directory(&checkout_dir, &job.execution.working_directory)?;
@@ -531,10 +544,11 @@ fn prepare_workspace(job: &LeaseJob, config: &WorkerConfig) -> Result<TempDir, W
 
 async fn checkout_repo(
     git_bin: &str,
+    git_token: Option<&str>,
     job: &LeaseJob,
     checkout_dir: &Path,
 ) -> Result<(), WorkerFailure> {
-    let clone_status = Command::new(git_bin)
+    let clone_status = build_git_command(git_bin, &job.source.repo_url, git_token)
         .arg("clone")
         .arg("--depth")
         .arg("1")
@@ -554,7 +568,7 @@ async fn checkout_repo(
         ));
     }
 
-    let fetch_status = Command::new(git_bin)
+    let fetch_status = build_git_command(git_bin, &job.source.repo_url, git_token)
         .arg("-C")
         .arg(checkout_dir)
         .arg("fetch")
@@ -591,6 +605,35 @@ async fn checkout_repo(
     }
 
     Ok(())
+}
+
+fn build_git_command(git_bin: &str, repo_url: &str, git_token: Option<&str>) -> Command {
+    let mut command = Command::new(git_bin);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+
+    if let Some(header) = github_auth_header(repo_url, git_token) {
+        command.arg("-c").arg(format!(
+            "http.https://github.com/.extraHeader=AUTHORIZATION: basic {header}"
+        ));
+    }
+
+    command
+}
+
+fn github_auth_header(repo_url: &str, git_token: Option<&str>) -> Option<String> {
+    let token = git_token?.trim();
+    if token.is_empty() || !is_github_https_url(repo_url) {
+        return None;
+    }
+
+    Some(BASE64_STANDARD.encode(format!("x-access-token:{token}")))
+}
+
+fn is_github_https_url(repo_url: &str) -> bool {
+    repo_url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://github.com/")
 }
 
 fn resolve_working_directory(
@@ -709,8 +752,8 @@ fn normalize_ref_name(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_ref_name, resolve_sandtrace_bin, resolve_working_directory, ExecutionMode,
-        WorkerConfig,
+        github_auth_header, is_github_https_url, normalize_ref_name, resolve_sandtrace_bin,
+        resolve_working_directory, ExecutionMode, WorkerConfig,
     };
     use std::path::PathBuf;
 
@@ -743,6 +786,7 @@ mod tests {
             sandtrace_bin: Some(PathBuf::from("/opt/sandtrace/bin/sandtrace")),
             ingest_url: None,
             ingest_api_key: None,
+            git_token: None,
             git_bin: "git".into(),
             workspace_root: None,
         };
@@ -750,6 +794,24 @@ mod tests {
         assert_eq!(
             resolve_sandtrace_bin(&config),
             PathBuf::from("/opt/sandtrace/bin/sandtrace")
+        );
+    }
+
+    #[test]
+    fn github_auth_header_only_applies_to_github_https_urls() {
+        assert!(is_github_https_url(
+            "https://github.com/cc-consulting-nv/web.git"
+        ));
+        assert!(!is_github_https_url(
+            "git@github.com:cc-consulting-nv/web.git"
+        ));
+        assert!(!is_github_https_url("https://gitlab.com/acme/demo.git"));
+        assert!(
+            github_auth_header("https://github.com/cc-consulting-nv/web.git", Some("tok"))
+                .is_some()
+        );
+        assert!(
+            github_auth_header("git@github.com:cc-consulting-nv/web.git", Some("tok")).is_none()
         );
     }
 }

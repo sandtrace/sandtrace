@@ -17,7 +17,8 @@ async fn orchestrator_and_stub_worker_complete_a_runtime_job() -> anyhow::Result
 
     reset_runtime_tables(&database_url).await?;
 
-    let mut orchestrator = spawn_orchestrator(&database_url, &bind.to_string(), admin_token, worker_token)?;
+    let mut orchestrator =
+        spawn_orchestrator(&database_url, &bind.to_string(), admin_token, worker_token)?;
     wait_for_healthz(&base_url).await?;
 
     let client = reqwest::Client::builder()
@@ -60,9 +61,7 @@ async fn orchestrator_and_stub_worker_complete_a_runtime_job() -> anyhow::Result
         .expect("job_id response")
         .to_string();
 
-    let worker_status = Command::new(assert_cmd::cargo::cargo_bin!(
-        "sandtrace-runtime-worker"
-    ))
+    let worker_status = Command::new(assert_cmd::cargo::cargo_bin!("sandtrace-runtime-worker"))
         .env("SANDTRACE_RUNTIME_URL", &base_url)
         .env("SANDTRACE_RUNTIME_WORKER_TOKEN", worker_token)
         .env("SANDTRACE_RUNTIME_STUB_MODE", "uploaded")
@@ -75,11 +74,9 @@ async fn orchestrator_and_stub_worker_complete_a_runtime_job() -> anyhow::Result
     let job = wait_for_uploaded_job(&client, &base_url, admin_token, &job_id).await?;
     assert_eq!(job["status"], "uploaded");
     assert_eq!(job["project_slug"], "web");
-    assert!(
-        job["ingest_run_id"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("run_stub_"))
-    );
+    assert!(job["ingest_run_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("run_stub_")));
 
     let events_response = client
         .get(format!("{base_url}/v1/runtime/jobs/{job_id}/events"))
@@ -111,13 +108,13 @@ fn spawn_orchestrator(
     let child = Command::new(assert_cmd::cargo::cargo_bin!(
         "sandtrace-runtime-orchestrator"
     ))
-        .env("SANDTRACE_RUNTIME_DATABASE_URL", database_url)
-        .env("SANDTRACE_RUNTIME_BIND", bind)
-        .env("SANDTRACE_RUNTIME_ADMIN_TOKEN", admin_token)
-        .env("SANDTRACE_RUNTIME_WORKER_TOKEN", worker_token)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    .env("SANDTRACE_RUNTIME_DATABASE_URL", database_url)
+    .env("SANDTRACE_RUNTIME_BIND", bind)
+    .env("SANDTRACE_RUNTIME_ADMIN_TOKEN", admin_token)
+    .env("SANDTRACE_RUNTIME_WORKER_TOKEN", worker_token)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()?;
     Ok(child)
 }
 

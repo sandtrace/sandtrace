@@ -128,8 +128,14 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("failed to build runtime worker http client")?;
 
-    let lease = claim_lease(&client, &runtime_url, &worker_id, &pool, worker_token.as_deref())
-        .await?;
+    let lease = claim_lease(
+        &client,
+        &runtime_url,
+        &worker_id,
+        &pool,
+        worker_token.as_deref(),
+    )
+    .await?;
 
     let Some(lease) = lease else {
         eprintln!("sandtrace-runtime-worker: no queued runtime jobs");
@@ -156,7 +162,13 @@ async fn main() -> anyhow::Result<()> {
         remaining -= step;
 
         if remaining > 0 {
-            send_heartbeat(&client, &runtime_url, &lease.lease_id, worker_token.as_deref()).await?;
+            send_heartbeat(
+                &client,
+                &runtime_url,
+                &lease.lease_id,
+                worker_token.as_deref(),
+            )
+            .await?;
             eprintln!(
                 "sandtrace-runtime-worker: heartbeat {} expires_at={}",
                 lease.lease_id, lease.lease_expires_at
@@ -223,7 +235,10 @@ async fn claim_lease(
         builder = builder.bearer_auth(token);
     }
 
-    let response = builder.send().await.context("failed to claim runtime lease")?;
+    let response = builder
+        .send()
+        .await
+        .context("failed to claim runtime lease")?;
     match response.status() {
         StatusCode::OK => Ok(Some(
             response

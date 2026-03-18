@@ -279,9 +279,15 @@ struct StatusResponse {
 pub async fn serve(state: RuntimeState, bind: SocketAddr) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/runtime/jobs", post(create_runtime_job).get(list_runtime_jobs))
+        .route(
+            "/v1/runtime/jobs",
+            post(create_runtime_job).get(list_runtime_jobs),
+        )
         .route("/v1/runtime/jobs/{job_id}", get(get_runtime_job))
-        .route("/v1/runtime/jobs/{job_id}/events", get(list_runtime_job_events))
+        .route(
+            "/v1/runtime/jobs/{job_id}/events",
+            get(list_runtime_job_events),
+        )
         .route("/v1/runtime/jobs/{job_id}/cancel", post(cancel_runtime_job))
         .route("/v1/runtime/leases", post(claim_runtime_lease))
         .route(
@@ -292,7 +298,10 @@ pub async fn serve(state: RuntimeState, bind: SocketAddr) -> anyhow::Result<()> 
             "/v1/runtime/leases/{lease_id}/complete",
             post(complete_runtime_lease),
         )
-        .route("/v1/runtime/leases/{lease_id}/fail", post(fail_runtime_lease))
+        .route(
+            "/v1/runtime/leases/{lease_id}/fail",
+            post(fail_runtime_lease),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -314,7 +323,8 @@ async fn create_runtime_job(
 
     let job_id = prefixed_ulid("rtj");
     let client = state.pool.get().await.map_err(ApiError::internal)?;
-    let command_json = serde_json::to_value(&payload.execution.command).map_err(ApiError::internal)?;
+    let command_json =
+        serde_json::to_value(&payload.execution.command).map_err(ApiError::internal)?;
     let created_at = Utc::now();
 
     client
@@ -369,11 +379,14 @@ async fn create_runtime_job(
     .await
     .map_err(ApiError::internal)?;
 
-    Ok((StatusCode::CREATED, Json(CreateRuntimeJobResponse {
-        job_id,
-        status: "queued".to_string(),
-        created_at: created_at.to_rfc3339(),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateRuntimeJobResponse {
+            job_id,
+            status: "queued".to_string(),
+            created_at: created_at.to_rfc3339(),
+        }),
+    ))
 }
 
 async fn list_runtime_jobs(
@@ -397,12 +410,23 @@ async fn list_runtime_jobs(
             order by created_at desc
             limit $5
             "#,
-            &[&query.project_slug, &query.status, &query.trigger_kind, &query.git_commit, &limit],
+            &[
+                &query.project_slug,
+                &query.status,
+                &query.trigger_kind,
+                &query.git_commit,
+                &limit,
+            ],
         )
         .await
         .map_err(ApiError::internal)?;
 
-    Ok(Json(rows.into_iter().map(runtime_job_from_row).collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?))
+    Ok(Json(
+        rows.into_iter()
+            .map(runtime_job_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::internal)?,
+    ))
 }
 
 async fn get_runtime_job(
@@ -524,7 +548,13 @@ async fn claim_runtime_lease(
             lease_ulid, job_ulid, worker_id, pool, status, expires_at
         ) values ($1, $2, $3, $4, 'active', $5)
         "#,
-        &[&lease_id, &job_id, &payload.worker_id, &payload.pool, &expires_at],
+        &[
+            &lease_id,
+            &job_id,
+            &payload.worker_id,
+            &payload.pool,
+            &expires_at,
+        ],
     )
     .await
     .map_err(ApiError::internal)?;
@@ -599,7 +629,9 @@ async fn heartbeat_runtime_lease(
     )
     .await
     .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true, "lease_expires_at": expires_at.to_rfc3339() })))
+    Ok(Json(
+        json!({ "ok": true, "lease_expires_at": expires_at.to_rfc3339() }),
+    ))
 }
 
 async fn complete_runtime_lease(
@@ -638,7 +670,11 @@ async fn complete_runtime_lease(
             finished_at = coalesce($3::timestamptz, now())
         where job_ulid = $1
         "#,
-        &[&job_id, &payload.result.ingest_run_id, &payload.result.uploaded_at],
+        &[
+            &job_id,
+            &payload.result.ingest_run_id,
+            &payload.result.uploaded_at,
+        ],
     )
     .await
     .map_err(ApiError::internal)?;
@@ -749,7 +785,9 @@ fn validate_job_request(payload: &CreateRuntimeJobRequest) -> Result<(), ApiErro
         return Err(ApiError::bad_request("project_slug is required"));
     }
     if payload.source.repo_url.trim().is_empty() || payload.source.git_commit.trim().is_empty() {
-        return Err(ApiError::bad_request("repo_url and git_commit are required"));
+        return Err(ApiError::bad_request(
+            "repo_url and git_commit are required",
+        ));
     }
     if payload.execution.command.is_empty()
         || payload

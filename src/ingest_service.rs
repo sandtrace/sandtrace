@@ -3597,7 +3597,9 @@ async fn ingest(
 }
 
 fn infer_project_slug_from_payload(payload: &Value) -> Option<String> {
-    let repo_url = payload.pointer("/project/repo_url").and_then(Value::as_str)?;
+    let repo_url = payload
+        .pointer("/project/repo_url")
+        .and_then(Value::as_str)?;
     infer_project_slug_from_repo_url(repo_url)
 }
 

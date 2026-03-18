@@ -1,5 +1,6 @@
 use crate::cli::{AuditArgs, RunArgs, SbomArgs, SbomFormat};
 use crate::event::{AuditFinding, Severity, TraceSummary};
+use anyhow::Context;
 use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -84,7 +85,7 @@ pub fn upload_audit(
     findings: &[AuditFinding],
     file_count: usize,
     duration_ms: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Value> {
     let target = args
         .target
         .canonicalize()
@@ -103,7 +104,7 @@ pub fn upload_run(
     args: &RunArgs,
     summary: &TraceSummary,
     working_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Value> {
     let cwd = working_dir
         .canonicalize()
         .unwrap_or_else(|_| working_dir.to_path_buf());
@@ -122,7 +123,7 @@ pub fn upload_sbom(
     target: &Path,
     bom: &Value,
     manifest_sources: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Value> {
     let payload = envelope(
         "sbom",
         target,
@@ -132,7 +133,7 @@ pub fn upload_sbom(
     post_json(config, "/v1/ingest/sbom", payload)
 }
 
-fn post_json(config: &CloudConfig, path: &str, payload: Value) -> anyhow::Result<()> {
+fn post_json(config: &CloudConfig, path: &str, payload: Value) -> anyhow::Result<Value> {
     let upload_id = payload
         .get("upload_id")
         .and_then(Value::as_str)
@@ -157,7 +158,11 @@ fn post_json(config: &CloudConfig, path: &str, payload: Value) -> anyhow::Result
         anyhow::bail!("cloud upload failed with status {}", status);
     }
 
-    Ok(())
+    let body = response
+        .json::<Value>()
+        .context("cloud upload succeeded but response was not valid json")?;
+
+    Ok(body)
 }
 
 fn envelope(command: &str, project_path: &Path, config: &CloudConfig, payload: Value) -> Value {

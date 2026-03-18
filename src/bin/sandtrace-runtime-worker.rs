@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::Utc;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -120,6 +120,9 @@ struct WorkerConfig {
     execution_mode: ExecutionMode,
     stub_delay_secs: u64,
     heartbeat_secs: u64,
+    sandtrace_bin: Option<PathBuf>,
+    ingest_url: Option<String>,
+    ingest_api_key: Option<String>,
     git_bin: String,
     workspace_root: Option<PathBuf>,
 }
@@ -169,6 +172,17 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(30),
+        sandtrace_bin: std::env::var_os("SANDTRACE_RUNTIME_SANDTRACE_BIN").map(PathBuf::from),
+        ingest_url: std::env::var("SANDTRACE_RUNTIME_INGEST_URL")
+            .ok()
+            .or_else(|| std::env::var("SANDTRACE_CLOUD_URL").ok())
+            .map(|value| value.trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty()),
+        ingest_api_key: std::env::var("SANDTRACE_RUNTIME_INGEST_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("SANDTRACE_API_KEY").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         git_bin: std::env::var("SANDTRACE_RUNTIME_GIT_BIN").unwrap_or_else(|_| "git".to_string()),
         workspace_root: std::env::var_os("SANDTRACE_RUNTIME_WORKSPACE_ROOT").map(PathBuf::from),
     };
@@ -437,6 +451,18 @@ async fn run_stub_failure(config: &WorkerConfig) -> Result<String, WorkerFailure
 }
 
 async fn run_command_mode(job: &LeaseJob, config: &WorkerConfig) -> Result<String, WorkerFailure> {
+    let ingest_api_key = config.ingest_api_key.as_ref().ok_or_else(|| {
+        WorkerFailure::new(
+            "missing_ingest_api_key",
+            "configure SANDTRACE_RUNTIME_INGEST_API_KEY or SANDTRACE_API_KEY",
+        )
+    })?;
+    let ingest_url = config.ingest_url.as_ref().ok_or_else(|| {
+        WorkerFailure::new(
+            "missing_ingest_url",
+            "configure SANDTRACE_RUNTIME_INGEST_URL or SANDTRACE_CLOUD_URL",
+        )
+    })?;
     let workspace = prepare_workspace(job, config)?;
     let checkout_dir = workspace.path().join("repo");
 
@@ -444,14 +470,26 @@ async fn run_command_mode(job: &LeaseJob, config: &WorkerConfig) -> Result<Strin
 
     let working_directory =
         resolve_working_directory(&checkout_dir, &job.execution.working_directory)?;
-    let mut command = build_command(job, &working_directory)?;
+    let sandtrace_bin = resolve_sandtrace_bin(config);
+    let output_path = workspace.path().join("sandtrace-run.jsonl");
+    let result_path = workspace.path().join("sandtrace-cloud-result.json");
+    let mut command =
+        build_sandtrace_command(&sandtrace_bin, job, &working_directory, &output_path)?;
+    command.env("SANDTRACE_API_KEY", ingest_api_key);
+    command.env("SANDTRACE_CLOUD_URL", ingest_url);
+    command.env("SANDTRACE_CLOUD_RESULT_FILE", &result_path);
+    command.env("SANDTRACE_CLOUD_ENVIRONMENT", "hosted_runtime");
     let output = tokio::time::timeout(
-        Duration::from_secs(job.execution.timeout_seconds.max(1) as u64),
+        Duration::from_secs(job.execution.timeout_seconds.max(1) as u64 + 30),
         command.output(),
     )
     .await
     .map_err(|_| WorkerFailure::new("timeout", "runtime command timed out"))?
     .map_err(|error| WorkerFailure::new("command_spawn_failed", error.to_string()))?;
+
+    if let Some(run_id) = load_ingest_run_id(&result_path)? {
+        return Ok(run_id);
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -467,9 +505,12 @@ async fn run_command_mode(job: &LeaseJob, config: &WorkerConfig) -> Result<Strin
         return Err(WorkerFailure::new("command_failed", message));
     }
 
-    Ok(format!(
-        "run_cmd_{}",
-        Ulid::new().to_string().to_lowercase()
+    Err(WorkerFailure::new(
+        "ingest_upload_missing",
+        format!(
+            "sandtrace run completed without a cloud result file: {}",
+            result_path.display()
+        ),
     ))
 }
 
@@ -585,7 +626,12 @@ fn resolve_working_directory(
     Ok(resolved)
 }
 
-fn build_command(job: &LeaseJob, working_directory: &Path) -> Result<Command, WorkerFailure> {
+fn build_sandtrace_command(
+    sandtrace_bin: &Path,
+    job: &LeaseJob,
+    working_directory: &Path,
+    output_path: &Path,
+) -> Result<Command, WorkerFailure> {
     if job.execution.command.is_empty() {
         return Err(WorkerFailure::new(
             "invalid_command",
@@ -593,10 +639,54 @@ fn build_command(job: &LeaseJob, working_directory: &Path) -> Result<Command, Wo
         ));
     }
 
-    let mut command = Command::new(&job.execution.command[0]);
-    command.args(&job.execution.command[1..]);
+    let mut command = Command::new(sandtrace_bin);
+    command.arg("run");
+    if job.execution.allow_network {
+        command.arg("--allow-net");
+    }
+    if job.execution.allow_exec {
+        command.arg("--allow-exec");
+    }
+    command.arg("--timeout");
+    command.arg(job.execution.timeout_seconds.max(1).to_string());
+    command.arg("--output");
+    command.arg(output_path);
+    command.arg("--");
+    command.args(&job.execution.command);
     command.current_dir(working_directory);
     Ok(command)
+}
+
+fn resolve_sandtrace_bin(config: &WorkerConfig) -> PathBuf {
+    if let Some(path) = &config.sandtrace_bin {
+        return path.clone();
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let sibling = parent.join("sandtrace");
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+
+    PathBuf::from("sandtrace")
+}
+
+fn load_ingest_run_id(result_path: &Path) -> Result<Option<String>, WorkerFailure> {
+    if !result_path.exists() {
+        return Ok(None);
+    }
+
+    let contents = std::fs::read_to_string(result_path)
+        .map_err(|error| WorkerFailure::new("ingest_result_read_failed", error.to_string()))?;
+    let payload: Value = serde_json::from_str(&contents)
+        .map_err(|error| WorkerFailure::new("ingest_result_invalid", error.to_string()))?;
+    Ok(payload
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
 }
 
 fn clone_ref(job: &LeaseJob) -> &str {
@@ -618,7 +708,11 @@ fn normalize_ref_name(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_ref_name, resolve_working_directory};
+    use super::{
+        normalize_ref_name, resolve_sandtrace_bin, resolve_working_directory, ExecutionMode,
+        WorkerConfig,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn normalize_ref_name_handles_head_refs() {
@@ -634,5 +728,28 @@ mod tests {
         let error = resolve_working_directory(checkout.path(), "../secret").unwrap_err();
 
         assert_eq!(error.reason, "invalid_working_directory");
+    }
+
+    #[test]
+    fn resolve_sandtrace_bin_uses_explicit_path() {
+        let config = WorkerConfig {
+            runtime_url: "http://127.0.0.1:8081".into(),
+            worker_id: "wrk_test".into(),
+            pool: "shared-linux".into(),
+            worker_token: None,
+            execution_mode: ExecutionMode::StubUploaded,
+            stub_delay_secs: 1,
+            heartbeat_secs: 1,
+            sandtrace_bin: Some(PathBuf::from("/opt/sandtrace/bin/sandtrace")),
+            ingest_url: None,
+            ingest_api_key: None,
+            git_bin: "git".into(),
+            workspace_root: None,
+        };
+
+        assert_eq!(
+            resolve_sandtrace_bin(&config),
+            PathBuf::from("/opt/sandtrace/bin/sandtrace")
+        );
     }
 }

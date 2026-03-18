@@ -15,6 +15,8 @@ The ingest workload is intentionally separate from the product UI.
 - `sandtrace-ingest` stays machine-facing and write-heavy
 - a future Laravel app or dashboard can sit on top of the normalized records instead of handling raw uploads directly
 
+For `sandtrace run`, the recommended long-term product model is a separate hosted execution add-on rather than forcing privileged tracing into standard CI runners. See [Hosted Runtime Analysis](./guides/hosted-runtime-analysis.md).
+
 ## Service endpoints
 
 Current endpoints exposed by `sandtrace-ingest`:

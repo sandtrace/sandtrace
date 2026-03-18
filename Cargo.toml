@@ -96,3 +96,11 @@ path = "src/main.rs"
 [[bin]]
 name = "sandtrace-ingest"
 path = "src/bin/sandtrace-ingest.rs"
+
+[[bin]]
+name = "sandtrace-runtime-orchestrator"
+path = "src/bin/sandtrace-runtime-orchestrator.rs"
+
+[[bin]]
+name = "sandtrace-runtime-worker"
+path = "src/bin/sandtrace-runtime-worker.rs"

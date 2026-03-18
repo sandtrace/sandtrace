@@ -661,20 +661,15 @@ async fn complete_runtime_lease(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("active lease not found"))?;
     let job_id: String = lease_row.get("job_ulid");
-
     tx.execute(
         r#"
         update runtime_jobs
         set status = 'uploaded',
             ingest_run_id = $2,
-            finished_at = coalesce($3::timestamptz, now())
+            finished_at = now()
         where job_ulid = $1
         "#,
-        &[
-            &job_id,
-            &payload.result.ingest_run_id,
-            &payload.result.uploaded_at,
-        ],
+        &[&job_id, &payload.result.ingest_run_id],
     )
     .await
     .map_err(ApiError::internal)?;

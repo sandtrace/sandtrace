@@ -98,10 +98,40 @@ fn run_sandbox(args: cli::RunArgs) -> anyhow::Result<()> {
         (cloud::CloudConfig::from_env(), tracer.last_summary())
     {
         let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        if let Err(error) = cloud::upload_run(&cloud_config, &args, summary, &working_dir) {
-            eprintln!("Warning: failed to upload run results to Sandtrace Cloud: {error}");
+        match cloud::upload_run(&cloud_config, &args, summary, &working_dir) {
+            Ok(response) => {
+                if let Err(error) = persist_cloud_result(&response) {
+                    eprintln!(
+                        "Warning: failed to persist Sandtrace Cloud upload response: {error}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("Warning: failed to upload run results to Sandtrace Cloud: {error}");
+            }
         }
     }
 
     std::process::exit(exit_code);
+}
+
+fn persist_cloud_result(response: &serde_json::Value) -> anyhow::Result<()> {
+    let Some(path) = std::env::var_os("SANDTRACE_CLOUD_RESULT_FILE") else {
+        return Ok(());
+    };
+
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent directory for cloud result file: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let json = serde_json::to_vec_pretty(response).context("failed to encode cloud result")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("failed to write cloud result file: {}", path.display()))?;
+    Ok(())
 }

@@ -65,6 +65,7 @@ notify-rust = "4"
 
 # EDR: HTTP webhook dispatch
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+base64 = "0.22"
 
 # EDR: Daemon signal handling
 signal-hook = "0.3"
@@ -83,9 +84,9 @@ sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 ulid = "1.2"
+tempfile = "3.14"
 
 [dev-dependencies]
-tempfile = "3.14"
 assert_cmd = "2.0"
 predicates = "3.1"
 

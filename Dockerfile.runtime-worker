@@ -1,0 +1,24 @@
+FROM rust:1.87-bookworm AS builder
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY rules ./rules
+
+RUN cargo build --release --bin sandtrace --bin sandtrace-runtime-worker
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system sandtrace \
+    && useradd --system --gid sandtrace --create-home --home-dir /var/lib/sandtrace sandtrace
+
+WORKDIR /app
+COPY --from=builder /app/target/release/sandtrace /usr/local/bin/sandtrace
+COPY --from=builder /app/target/release/sandtrace-runtime-worker /usr/local/bin/sandtrace-runtime-worker
+
+USER sandtrace
+
+CMD ["sandtrace-runtime-worker"]

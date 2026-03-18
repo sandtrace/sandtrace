@@ -83,9 +83,9 @@ sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 ulid = "1.2"
+tempfile = "3.14"
 
 [dev-dependencies]
-tempfile = "3.14"
 assert_cmd = "2.0"
 predicates = "3.1"
 

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::{
     Manager, ManagerConfig as PgManagerConfig, Pool, RecyclingMethod, Runtime,
 };
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -18,6 +19,10 @@ pub struct RuntimeState {
     pool: Pool,
     admin_token: Option<String>,
     worker_token: Option<String>,
+    github_status_token: Option<String>,
+    github_status_context: String,
+    runtime_status_target_base_url: Option<String>,
+    http_client: HttpClient,
 }
 
 impl RuntimeState {
@@ -46,6 +51,23 @@ impl RuntimeState {
                 .ok()
                 .or_else(|| std::env::var("SANDTRACE_INGEST_ADMIN_TOKEN").ok()),
             worker_token: std::env::var("SANDTRACE_RUNTIME_WORKER_TOKEN").ok(),
+            github_status_token: std::env::var("SANDTRACE_RUNTIME_GITHUB_STATUS_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("SANDTRACE_RUNTIME_GITHUB_TOKEN").ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            github_status_context: std::env::var("SANDTRACE_RUNTIME_GITHUB_STATUS_CONTEXT")
+                .unwrap_or_else(|_| "sandtrace/hosted-runtime".to_string()),
+            runtime_status_target_base_url: std::env::var(
+                "SANDTRACE_RUNTIME_STATUS_TARGET_BASE_URL",
+            )
+            .ok()
+            .or_else(|| std::env::var("SANDTRACE_CLOUD_APP_URL").ok())
+            .map(|value| value.trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty()),
+            http_client: HttpClient::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?,
         };
         state.initialize_schema().await?;
         Ok(state)
@@ -202,6 +224,35 @@ struct RuntimeJobResponse {
     created_at: String,
     started_at: Option<String>,
     finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubStatusJob {
+    job_id: String,
+    project_slug: String,
+    repo_url: String,
+    repo_owner: Option<String>,
+    repo_name: Option<String>,
+    git_commit: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GitHubStatusState {
+    Pending,
+    Success,
+    Failure,
+    Error,
+}
+
+impl GitHubStatusState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -378,6 +429,21 @@ async fn create_runtime_job(
     )
     .await
     .map_err(ApiError::internal)?;
+
+    publish_github_status(
+        &state,
+        GitHubStatusJob {
+            job_id: job_id.clone(),
+            project_slug: payload.project_slug.clone(),
+            repo_url: payload.source.repo_url.clone(),
+            repo_owner: payload.source.owner.clone(),
+            repo_name: payload.source.repo.clone(),
+            git_commit: payload.source.git_commit.clone(),
+        },
+        GitHubStatusState::Pending,
+        "Hosted runtime job queued",
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
@@ -587,9 +653,25 @@ async fn claim_runtime_lease(
 
     tx.commit().await.map_err(ApiError::internal)?;
 
+    let lease_job = lease_job_from_row(job_row).map_err(ApiError::internal)?;
+    publish_github_status(
+        &state,
+        GitHubStatusJob {
+            job_id: lease_job.job_id.clone(),
+            project_slug: lease_job.project_slug.clone(),
+            repo_url: lease_job.source.repo_url.clone(),
+            repo_owner: lease_job.source.owner.clone(),
+            repo_name: lease_job.source.repo.clone(),
+            git_commit: lease_job.source.git_commit.clone(),
+        },
+        GitHubStatusState::Pending,
+        "Hosted runtime analysis running",
+    )
+    .await;
+
     Ok(Json(LeaseResponse {
         lease_id,
-        job: lease_job_from_row(job_row).map_err(ApiError::internal)?,
+        job: lease_job,
         lease_expires_at: expires_at.to_rfc3339(),
     }))
 }
@@ -688,6 +770,21 @@ async fn complete_runtime_lease(
     .await
     .map_err(ApiError::internal)?;
     tx.commit().await.map_err(ApiError::internal)?;
+
+    let row = client
+        .query_one(
+            "select job_ulid, project_slug, repo_url, repo_owner, repo_name, git_commit from runtime_jobs where job_ulid = $1",
+            &[&job_id],
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    publish_github_status(
+        &state,
+        github_status_job_from_row(&row),
+        GitHubStatusState::Success,
+        "Hosted runtime analysis uploaded",
+    )
+    .await;
     Ok(Json(StatusResponse { ok: true }))
 }
 
@@ -748,6 +845,23 @@ async fn fail_runtime_lease(
     .await
     .map_err(ApiError::internal)?;
     tx.commit().await.map_err(ApiError::internal)?;
+
+    let row = client
+        .query_one(
+            "select job_ulid, project_slug, repo_url, repo_owner, repo_name, git_commit from runtime_jobs where job_ulid = $1",
+            &[&job_id],
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    let description =
+        summarize_failure_description(&payload.result.reason, &payload.result.message);
+    publish_github_status(
+        &state,
+        github_status_job_from_row(&row),
+        GitHubStatusState::Failure,
+        &description,
+    )
+    .await;
     Ok(Json(StatusResponse { ok: true }))
 }
 
@@ -916,6 +1030,143 @@ fn runtime_job_event_from_row(row: Row) -> anyhow::Result<RuntimeJobEventRespons
     })
 }
 
+fn github_status_job_from_row(row: &Row) -> GitHubStatusJob {
+    GitHubStatusJob {
+        job_id: row.get("job_ulid"),
+        project_slug: row.get("project_slug"),
+        repo_url: row.get("repo_url"),
+        repo_owner: row.get("repo_owner"),
+        repo_name: row.get("repo_name"),
+        git_commit: row.get("git_commit"),
+    }
+}
+
+async fn publish_github_status(
+    state: &RuntimeState,
+    job: GitHubStatusJob,
+    status: GitHubStatusState,
+    description: &str,
+) {
+    let Some(token) = state.github_status_token.as_deref() else {
+        return;
+    };
+
+    let Some((owner, repo)) = github_repo_identity(&job) else {
+        eprintln!(
+            "sandtrace-runtime-orchestrator: unable to infer GitHub repo for {}",
+            job.job_id
+        );
+        return;
+    };
+
+    let description = truncate_github_description(description);
+    let mut payload = json!({
+        "state": status.as_str(),
+        "context": state.github_status_context,
+        "description": description,
+    });
+    if let Some(target_url) = runtime_job_target_url(state, &job) {
+        payload["target_url"] = Value::String(target_url);
+    }
+
+    let response = state
+        .http_client
+        .post(format!(
+            "https://api.github.com/repos/{owner}/{repo}/statuses/{}",
+            job.git_commit
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "sandtrace-runtime-orchestrator")
+        .json(&payload)
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let status_code = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!(
+                "sandtrace-runtime-orchestrator: github status publish failed for {}: {} {}",
+                job.job_id, status_code, body
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "sandtrace-runtime-orchestrator: github status publish failed for {}: {}",
+                job.job_id, error
+            );
+        }
+    }
+}
+
+fn github_repo_identity(job: &GitHubStatusJob) -> Option<(String, String)> {
+    if let (Some(owner), Some(repo)) = (&job.repo_owner, &job.repo_name) {
+        let owner = owner.trim();
+        let repo = repo.trim();
+        if !owner.is_empty() && !repo.is_empty() {
+            return Some((owner.to_string(), repo.to_string()));
+        }
+    }
+
+    infer_github_repo_from_url(&job.repo_url)
+}
+
+fn infer_github_repo_from_url(repo_url: &str) -> Option<(String, String)> {
+    let trimmed = repo_url.trim().trim_end_matches('/');
+    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        return None;
+    };
+
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim().trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn runtime_job_target_url(state: &RuntimeState, job: &GitHubStatusJob) -> Option<String> {
+    let base = state.runtime_status_target_base_url.as_deref()?;
+    Some(format!(
+        "{base}/cloud/projects/{}/runtime/{}",
+        job.project_slug, job.job_id
+    ))
+}
+
+fn truncate_github_description(description: &str) -> String {
+    const MAX: usize = 140;
+    let trimmed = description.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+
+    trimmed.chars().take(MAX - 1).collect::<String>() + "…"
+}
+
+fn summarize_failure_description(reason: &str, message: &str) -> String {
+    let reason = reason.trim();
+    let first_line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Hosted runtime analysis failed");
+    if reason.is_empty() {
+        truncate_github_description(first_line)
+    } else {
+        truncate_github_description(&format!("{reason}: {first_line}"))
+    }
+}
+
 async fn reap_expired_leases(client: &mut deadpool_postgres::Client) -> anyhow::Result<()> {
     let tx = client.transaction().await?;
     let rows = tx
@@ -1052,5 +1303,32 @@ mod tests {
         let value = prefixed_ulid("rtj");
         assert!(value.starts_with("rtj_"));
         assert_eq!(value, value.to_lowercase());
+    }
+
+    #[test]
+    fn infer_github_repo_from_url_handles_https_and_ssh() {
+        assert_eq!(
+            infer_github_repo_from_url("https://github.com/cc-consulting-nv/web.git"),
+            Some(("cc-consulting-nv".to_string(), "web".to_string()))
+        );
+        assert_eq!(
+            infer_github_repo_from_url("git@github.com:cc-consulting-nv/ccc-web.git"),
+            Some(("cc-consulting-nv".to_string(), "ccc-web".to_string()))
+        );
+        assert_eq!(
+            infer_github_repo_from_url("https://gitlab.com/acme/demo"),
+            None
+        );
+    }
+
+    #[test]
+    fn summarize_failure_description_uses_reason_and_first_line() {
+        assert_eq!(
+            summarize_failure_description(
+                "checkout_failed",
+                "git clone failed with status 128\nextra detail"
+            ),
+            "checkout_failed: git clone failed with status 128"
+        );
     }
 }

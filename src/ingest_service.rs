@@ -2161,49 +2161,6 @@ async fn projects_overview(
         }
     };
 
-    let mut security_alerts_by_to_id = BTreeMap::<String, Vec<Value>>::new();
-    if state.metadata_store.is_some() {
-        if let Err(error) =
-            backfill_sbom_security_alert_history(&state, &principal, &sbom_records).await
-        {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("failed to backfill sbom security alert history: {error}"),
-            );
-        }
-        if let Some(metadata_store) = &state.metadata_store {
-            let history_limit = sbom_records.len().saturating_mul(10).max(limit);
-            match metadata_store
-                .load_sbom_security_alert_history(
-                    principal.org_slug.as_str(),
-                    principal.project_slug.as_deref(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    history_limit,
-                )
-                .await
-            {
-                Ok(alerts) => {
-                    for alert in alerts {
-                        let to_id = string_field(&alert, "to_sbom_id");
-                        security_alerts_by_to_id
-                            .entry(to_id)
-                            .or_default()
-                            .push(alert);
-                    }
-                }
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to load sbom security alert history: {error}"),
-                    )
-                }
-            }
-        }
-    }
-
     let mut projects = BTreeMap::<String, Value>::new();
     for record in &audit_records {
         let project_slug = string_field(record, "project_slug");
@@ -2300,54 +2257,6 @@ async fn projects_overview(
         sbom_projects.entry(project_slug).or_default().push(record);
     }
 
-    for (project_slug, records) in sbom_projects {
-        if records.is_empty() {
-            continue;
-        }
-        let latest = records[0];
-        let latest_id = string_field(latest, "id");
-        let previous = records
-            .iter()
-            .skip(1)
-            .copied()
-            .find(|candidate| candidate.get("git_commit") != latest.get("git_commit"));
-        let package_alerts = match previous {
-            Some(from_record) => {
-                match build_sbom_alerts_for_pair(&state, &principal, from_record, latest).await {
-                    Ok(alerts) => alerts,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("failed to build project sbom alerts: {error}"),
-                        )
-                    }
-                }
-            }
-            None => Vec::new(),
-        };
-        let security_alerts = if let Some(alerts) = security_alerts_by_to_id.get(&latest_id) {
-            alerts.clone()
-        } else if let Some(from_record) = previous {
-            match build_sbom_security_alerts_for_pair(&state, &principal, from_record, latest).await
-            {
-                Ok((alerts, _)) => alerts,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::BAD_GATEWAY,
-                        &format!("failed to build project sbom security alerts: {error}"),
-                    )
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        if let Some(project) = projects.get_mut(&project_slug) {
-            project["current_package_alert_count"] = json!(package_alerts.len());
-            project["current_security_alert_count"] = json!(security_alerts.len());
-        }
-    }
-
     let mut items = projects.into_values().collect::<Vec<_>>();
     items.sort_by(|left, right| {
         string_field(right, "latest_activity_at")
@@ -2357,6 +2266,10 @@ async fn projects_overview(
             })
     });
     items.truncate(limit);
+
+    // Keep the overview endpoint cheap and deterministic. Detailed package and
+    // security alert counts are derived in the SBOM-specific endpoints instead of
+    // running package diffs and OSV lookups inline during dashboard load.
 
     Json(json!({
         "status": "ok",
@@ -6989,11 +6902,11 @@ mod tests {
         assert_eq!(overview["projects"][0]["total_findings"].as_u64(), Some(2));
         assert_eq!(
             overview["projects"][0]["current_package_alert_count"].as_u64(),
-            Some(2)
+            Some(0)
         );
         assert_eq!(
             overview["projects"][0]["current_security_alert_count"].as_u64(),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             overview["projects"][0]["latest_sbom"]["git_commit"].as_str(),

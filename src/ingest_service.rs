@@ -2822,7 +2822,7 @@ async fn sbom_security_alert_history(
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200) as usize;
     let alerts = if let Some(metadata_store) = &state.metadata_store {
-        let mut alerts = match metadata_store
+        match metadata_store
             .load_sbom_security_alert_history(
                 principal.org_slug.as_str(),
                 project_slug.as_deref(),
@@ -2841,47 +2841,7 @@ async fn sbom_security_alert_history(
                     &format!("failed to query sbom security alert history: {error}"),
                 )
             }
-        };
-        if alerts.is_empty() {
-            let sbom_records = match load_index_records(&state, &principal, "sbom", None).await {
-                Ok(records) => records,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to load sbom index: {error}"),
-                    )
-                }
-            };
-            if let Err(error) =
-                backfill_sbom_security_alert_history(&state, &principal, &sbom_records).await
-            {
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("failed to backfill sbom security alert history: {error}"),
-                );
-            }
-            alerts = match metadata_store
-                .load_sbom_security_alert_history(
-                    principal.org_slug.as_str(),
-                    project_slug.as_deref(),
-                    params.kind.as_deref(),
-                    params.from_git_commit.as_deref(),
-                    params.to_git_commit.as_deref(),
-                    params.package_identity.as_deref(),
-                    limit,
-                )
-                .await
-            {
-                Ok(alerts) => alerts,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to query sbom security alert history: {error}"),
-                    )
-                }
-            };
         }
-        alerts
     } else {
         let sbom_records = match load_index_records(&state, &principal, "sbom", None).await {
             Ok(records) => records,
@@ -3002,49 +2962,6 @@ async fn sbom_timeline(
         })
         .collect::<Vec<_>>();
 
-    let mut security_alerts_by_to_id = BTreeMap::<String, Vec<Value>>::new();
-    if state.metadata_store.is_some() {
-        if let Err(error) =
-            backfill_sbom_security_alert_history(&state, &principal, &filtered_records).await
-        {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("failed to backfill sbom security alert history: {error}"),
-            );
-        }
-        if let Some(metadata_store) = &state.metadata_store {
-            let history_limit = limit.saturating_mul(20).max(limit);
-            match metadata_store
-                .load_sbom_security_alert_history(
-                    principal.org_slug.as_str(),
-                    project_slug.as_deref(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    history_limit,
-                )
-                .await
-            {
-                Ok(alerts) => {
-                    for alert in alerts {
-                        let to_id = string_field(&alert, "to_sbom_id");
-                        security_alerts_by_to_id
-                            .entry(to_id)
-                            .or_default()
-                            .push(alert);
-                    }
-                }
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to load sbom security alert history: {error}"),
-                    )
-                }
-            }
-        }
-    }
-
     let mut projects = BTreeMap::<String, Vec<&Value>>::new();
     for record in &filtered_records {
         let key = record
@@ -3063,68 +2980,6 @@ async fn sbom_timeline(
                 .skip(index + 1)
                 .copied()
                 .find(|candidate| candidate.get("git_commit") != record.get("git_commit"));
-            let package_alerts = match from_record {
-                Some(from_record) => {
-                    match build_sbom_alerts_for_pair(&state, &principal, from_record, record).await
-                    {
-                        Ok(alerts) => alerts,
-                        Err(error) => {
-                            return error_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                &format!("failed to build sbom timeline alerts: {error}"),
-                            )
-                        }
-                    }
-                }
-                None => Vec::new(),
-            };
-            let security_alerts = if let Some(alerts) = security_alerts_by_to_id
-                .get(record.get("id").and_then(Value::as_str).unwrap_or_default())
-            {
-                alerts.clone()
-            } else if let Some(from_record) = from_record {
-                match build_sbom_security_alerts_for_pair(&state, &principal, from_record, record)
-                    .await
-                {
-                    Ok((alerts, _)) => alerts,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::BAD_GATEWAY,
-                            &format!("failed to build sbom timeline security alerts: {error}"),
-                        )
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-
-            let new_direct_package_count = package_alerts
-                .iter()
-                .filter(|alert| {
-                    alert.get("kind").and_then(Value::as_str) == Some("new_direct_package")
-                })
-                .count();
-            let direct_version_change_count = package_alerts
-                .iter()
-                .filter(|alert| {
-                    alert.get("kind").and_then(Value::as_str) == Some("direct_version_change")
-                })
-                .count();
-            let new_vulnerable_direct_package_count = security_alerts
-                .iter()
-                .filter(|alert| {
-                    alert.get("kind").and_then(Value::as_str)
-                        == Some("new_vulnerable_direct_package")
-                })
-                .count();
-            let vulnerable_direct_version_change_count = security_alerts
-                .iter()
-                .filter(|alert| {
-                    alert.get("kind").and_then(Value::as_str)
-                        == Some("vulnerable_direct_version_change")
-                })
-                .count();
-
             commits.push(json!({
                 "sbom_id": record.get("id").cloned().unwrap_or(Value::Null),
                 "project_slug": record.get("project_slug").cloned().unwrap_or(Value::Null),
@@ -3135,12 +2990,12 @@ async fn sbom_timeline(
                 "ecosystem_counts": record.get("ecosystem_counts").cloned().unwrap_or_else(|| json!({})),
                 "diff_base_sbom_id": from_record.and_then(|value| value.get("id").cloned()).unwrap_or(Value::Null),
                 "diff_base_git_commit": from_record.and_then(|value| value.get("git_commit").cloned()).unwrap_or(Value::Null),
-                "package_alert_count": package_alerts.len(),
-                "new_direct_package_count": new_direct_package_count,
-                "direct_version_change_count": direct_version_change_count,
-                "security_alert_count": security_alerts.len(),
-                "new_vulnerable_direct_package_count": new_vulnerable_direct_package_count,
-                "vulnerable_direct_version_change_count": vulnerable_direct_version_change_count,
+                "package_alert_count": 0,
+                "new_direct_package_count": 0,
+                "direct_version_change_count": 0,
+                "security_alert_count": 0,
+                "new_vulnerable_direct_package_count": 0,
+                "vulnerable_direct_version_change_count": 0,
             }));
         }
     }
@@ -3151,6 +3006,10 @@ async fn sbom_timeline(
             .then_with(|| string_field(right, "sbom_id").cmp(&string_field(left, "sbom_id")))
     });
     commits.truncate(limit);
+
+    // Keep the timeline endpoint cheap on first paint. Detailed package and
+    // security alert derivation belongs to the diff and alert-specific endpoints
+    // instead of running per-commit comparisons during dashboard load.
 
     let project_count = commits
         .iter()
@@ -6674,10 +6533,10 @@ mod tests {
         let timeline: Value = serde_json::from_slice(&timeline_body).unwrap();
 
         assert_eq!(timeline["summary"]["commit_count"].as_u64(), Some(2));
-        assert_eq!(timeline["summary"]["package_alert_count"].as_u64(), Some(2));
+        assert_eq!(timeline["summary"]["package_alert_count"].as_u64(), Some(0));
         assert_eq!(
             timeline["summary"]["security_alert_count"].as_u64(),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             timeline["commits"][0]["git_commit"].as_str(),
@@ -6685,11 +6544,11 @@ mod tests {
         );
         assert_eq!(
             timeline["commits"][0]["package_alert_count"].as_u64(),
-            Some(2)
+            Some(0)
         );
         assert_eq!(
             timeline["commits"][0]["security_alert_count"].as_u64(),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             timeline["commits"][1]["git_commit"].as_str(),

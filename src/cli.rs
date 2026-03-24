@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[command(
     about = "A Rust-based security tool: malware sandbox, credential watcher, and codebase auditor"
 )]
-#[command(version = "0.2.9")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

@@ -771,6 +771,39 @@ fn ingest_composer_lock(
         }
     }
 
+    for section in ["packages", "packages-dev"] {
+        if let Some(packages) = lock.get(section).and_then(Value::as_array) {
+            for package in packages {
+                let Some(name) = package.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !is_composer_package_name(name) {
+                    continue;
+                }
+                let Some(parent_ref) = refs_by_name.get(name).cloned() else {
+                    continue;
+                };
+
+                for dependency_section in ["require", "require-dev"] {
+                    let Some(dependencies) =
+                        package.get(dependency_section).and_then(Value::as_object)
+                    else {
+                        continue;
+                    };
+
+                    for dep_name in dependencies.keys() {
+                        if !is_composer_package_name(dep_name) {
+                            continue;
+                        }
+                        if let Some(child_ref) = refs_by_name.get(dep_name).cloned() {
+                            builder.add_dependency(parent_ref.clone(), child_ref);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(composer_json) = composer_json {
         for dep_name in direct_dependency_names_from_composer_json(composer_json)? {
             if let Some(dep_ref) = refs_by_name.get(&dep_name).cloned() {
@@ -4405,6 +4438,60 @@ packages:
             .components
             .iter()
             .any(|component| component.bom_ref == "pkg:composer/monolog/monolog@3.6.0"));
+    }
+
+    #[test]
+    fn composer_lock_emits_transitive_dependency_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("composer.json"),
+            serde_json::json!({
+                "name": "acme/demo",
+                "require": { "laravel/framework": "^12.0" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("composer.lock"),
+            serde_json::json!({
+                "packages": [
+                    {
+                        "name": "laravel/framework",
+                        "version": "12.52.0",
+                        "require": {
+                            "symfony/http-foundation": "^7.3"
+                        }
+                    },
+                    {
+                        "name": "symfony/http-foundation",
+                        "version": "7.3.0"
+                    }
+                ],
+                "packages-dev": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+        let root_ref = bom.metadata.component.bom_ref.clone();
+
+        let root_deps = bom
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.ref_ == root_ref)
+            .map(|dependency| dependency.depends_on.clone())
+            .unwrap_or_default();
+        assert!(root_deps.contains(&"pkg:composer/laravel/framework@12.52.0".to_string()));
+
+        let package_deps = bom
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.ref_ == "pkg:composer/laravel/framework@12.52.0")
+            .map(|dependency| dependency.depends_on.clone())
+            .unwrap_or_default();
+        assert!(package_deps.contains(&"pkg:composer/symfony/http-foundation@7.3.0".to_string()));
     }
 
     #[test]

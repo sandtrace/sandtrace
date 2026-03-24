@@ -467,6 +467,7 @@ fn ingest_npm_lock_value(
     }
 
     let mut refs_by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut refs_by_path: HashMap<String, String> = HashMap::new();
     if let Some(packages) = lock.get("packages").and_then(Value::as_object) {
         for (package_path, package) in packages {
             if package_path.is_empty() {
@@ -487,6 +488,7 @@ fn ingest_npm_lock_value(
                 name.clone(),
                 Some(version.to_string()),
             ));
+            refs_by_path.insert(package_path.clone(), purl.clone());
             refs_by_name
                 .entry(name)
                 .or_default()
@@ -511,6 +513,8 @@ fn ingest_npm_lock_value(
                 builder.add_root_dependency(dep_ref);
             }
         }
+
+        add_npm_package_lock_edges(packages, &refs_by_path, &refs_by_name, builder);
 
         return Ok(());
     }
@@ -537,6 +541,7 @@ fn ingest_pnpm_lock(
     }
 
     let mut refs_by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut refs_by_name_version: HashMap<(String, String), String> = HashMap::new();
     if let Some(packages) = lock.get("packages").and_then(Value::as_object) {
         for key in packages.keys() {
             let Some((name, version)) = parse_pnpm_package_key(key) else {
@@ -548,6 +553,10 @@ fn ingest_pnpm_lock(
                 name.clone(),
                 Some(version),
             ));
+            refs_by_name_version.insert(
+                (name.clone(), purl_version(&purl).unwrap_or_default()),
+                purl.clone(),
+            );
             refs_by_name.entry(name).or_default().push(purl);
         }
     }
@@ -564,9 +573,19 @@ fn ingest_pnpm_lock(
                     name.clone(),
                     Some(version),
                 ));
+                refs_by_name_version.insert(
+                    (name.clone(), purl_version(&purl).unwrap_or_default()),
+                    purl.clone(),
+                );
                 refs_by_name.entry(name).or_default().push(purl);
             }
         }
+    }
+
+    if let Some(packages) = lock.get("packages").and_then(Value::as_object) {
+        add_pnpm_dependency_edges(packages, &refs_by_name, &refs_by_name_version, builder);
+    } else if let Some(snapshots) = lock.get("snapshots").and_then(Value::as_object) {
+        add_pnpm_dependency_edges(snapshots, &refs_by_name, &refs_by_name_version, builder);
     }
 
     if let Some(importers) = lock.get("importers").and_then(Value::as_object) {
@@ -862,38 +881,42 @@ fn ingest_legacy_npm_dependencies(
     builder: &mut SbomBuilder,
 ) -> Result<()> {
     for (name, value) in dependencies {
-        let version = value.get("version").and_then(Value::as_str);
-        let purl = npm_purl(name, version);
-        builder.add_component(ComponentBuilder::new(
-            purl.clone(),
-            name.clone(),
-            version.map(ToOwned::to_owned),
-        ));
-        direct_refs.push(purl.clone());
-        if let Some(children) = value.get("dependencies").and_then(Value::as_object) {
-            ingest_nested_npm_dependencies(children, builder)?;
-        }
+        direct_refs.push(ingest_legacy_npm_dependency(name, value, builder)?);
     }
     Ok(())
+}
+
+fn ingest_legacy_npm_dependency(
+    name: &str,
+    value: &Value,
+    builder: &mut SbomBuilder,
+) -> Result<String> {
+    let version = value.get("version").and_then(Value::as_str);
+    let purl = npm_purl(name, version);
+    builder.add_component(ComponentBuilder::new(
+        purl.clone(),
+        name.to_string(),
+        version.map(ToOwned::to_owned),
+    ));
+
+    if let Some(children) = value.get("dependencies").and_then(Value::as_object) {
+        for child_ref in ingest_nested_npm_dependencies(children, builder)? {
+            builder.add_dependency(purl.clone(), child_ref);
+        }
+    }
+
+    Ok(purl)
 }
 
 fn ingest_nested_npm_dependencies(
     dependencies: &serde_json::Map<String, Value>,
     builder: &mut SbomBuilder,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut refs = Vec::new();
     for (name, value) in dependencies {
-        let version = value.get("version").and_then(Value::as_str);
-        let purl = npm_purl(name, version);
-        builder.add_component(ComponentBuilder::new(
-            purl.clone(),
-            name.clone(),
-            version.map(ToOwned::to_owned),
-        ));
-        if let Some(children) = value.get("dependencies").and_then(Value::as_object) {
-            ingest_nested_npm_dependencies(children, builder)?;
-        }
+        refs.push(ingest_legacy_npm_dependency(name, value, builder)?);
     }
-    Ok(())
+    Ok(refs)
 }
 
 fn ingest_package_json_manifest(path: &Path, builder: &mut SbomBuilder) -> Result<()> {
@@ -1122,6 +1145,78 @@ fn pnpm_importer_version(value: &Value) -> Option<String> {
 
 fn strip_peer_suffix(version: &str) -> &str {
     version.split(['(', '_']).next().unwrap_or(version).trim()
+}
+
+fn purl_version(purl: &str) -> Option<String> {
+    let version = purl.rsplit_once('@')?.1;
+    Some(version.to_string())
+}
+
+fn add_pnpm_dependency_edges(
+    packages: &serde_json::Map<String, Value>,
+    refs_by_name: &HashMap<String, Vec<String>>,
+    refs_by_name_version: &HashMap<(String, String), String>,
+    builder: &mut SbomBuilder,
+) {
+    for (key, package) in packages {
+        let Some((name, version)) = parse_pnpm_package_key(key) else {
+            continue;
+        };
+        let Some(parent_ref) = refs_by_name_version
+            .get(&(name.clone(), version.clone()))
+            .cloned()
+        else {
+            continue;
+        };
+
+        for section in ["dependencies", "optionalDependencies"] {
+            let Some(dependencies) = package.get(section).and_then(Value::as_object) else {
+                continue;
+            };
+
+            for (dep_name, dep_value) in dependencies {
+                if let Some(child_ref) = resolve_pnpm_dependency_ref(
+                    dep_name,
+                    dep_value,
+                    refs_by_name,
+                    refs_by_name_version,
+                ) {
+                    builder.add_dependency(parent_ref.clone(), child_ref);
+                }
+            }
+        }
+    }
+}
+
+fn resolve_pnpm_dependency_ref(
+    dep_name: &str,
+    dep_value: &Value,
+    refs_by_name: &HashMap<String, Vec<String>>,
+    refs_by_name_version: &HashMap<(String, String), String>,
+) -> Option<String> {
+    let exact_version = match dep_value {
+        Value::String(version) => Some(strip_peer_suffix(version).to_string()),
+        Value::Object(map) => map
+            .get("version")
+            .and_then(Value::as_str)
+            .map(strip_peer_suffix)
+            .map(ToOwned::to_owned),
+        _ => None,
+    };
+
+    exact_version
+        .as_ref()
+        .and_then(|version| {
+            refs_by_name_version
+                .get(&(dep_name.to_string(), version.clone()))
+                .cloned()
+        })
+        .or_else(|| {
+            refs_by_name
+                .get(dep_name)
+                .and_then(|refs| refs.first())
+                .cloned()
+        })
 }
 
 fn is_manifest_only_version(version: &str) -> bool {
@@ -3249,6 +3344,8 @@ fn ingest_cargo_lock(
         .unwrap_or_default();
 
     let mut refs_by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut refs_by_name_version: HashMap<(String, String), String> = HashMap::new();
+    let mut package_dependencies: Vec<(String, Vec<String>)> = Vec::new();
     for package in packages {
         let Some(name) = package.get("name").and_then(toml::Value::as_str) else {
             continue;
@@ -3265,7 +3362,18 @@ fn ingest_cargo_lock(
             name.to_string(),
             Some(version.to_string()),
         ));
+        refs_by_name_version.insert((name.to_string(), version.to_string()), purl.clone());
         refs_by_name.entry(name.to_string()).or_default().push(purl);
+
+        let dependencies = package
+            .get("dependencies")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        package_dependencies.push((format!("{name}@{version}"), dependencies));
     }
 
     for dep_name in direct_deps {
@@ -3278,7 +3386,59 @@ fn ingest_cargo_lock(
         }
     }
 
+    for (package_key, dependencies) in package_dependencies {
+        let Some((name, version)) = package_key.rsplit_once('@') else {
+            continue;
+        };
+        let Some(parent_ref) = refs_by_name_version
+            .get(&(name.to_string(), version.to_string()))
+            .cloned()
+        else {
+            continue;
+        };
+
+        for dependency in dependencies {
+            let Some((dep_name, dep_version)) = parse_cargo_lock_dependency(&dependency) else {
+                continue;
+            };
+            let child_ref = dep_version
+                .as_ref()
+                .and_then(|resolved| {
+                    refs_by_name_version
+                        .get(&(dep_name.clone(), resolved.clone()))
+                        .cloned()
+                })
+                .or_else(|| {
+                    refs_by_name
+                        .get(&dep_name)
+                        .and_then(|refs| refs.first())
+                        .cloned()
+                });
+
+            if let Some(child_ref) = child_ref {
+                builder.add_dependency(parent_ref.clone(), child_ref);
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn parse_cargo_lock_dependency(input: &str) -> Option<(String, Option<String>)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let package_part = trimmed
+        .split_once('(')
+        .map(|(value, _)| value)
+        .unwrap_or(trimmed)
+        .trim();
+    let mut parts = package_part.split_whitespace();
+    let name = parts.next()?.to_string();
+    let version = parts.next().map(ToOwned::to_owned);
+    Some((name, version))
 }
 
 fn ingest_cargo_toml_manifest(path: &Path, builder: &mut SbomBuilder) -> Result<()> {
@@ -3572,7 +3732,7 @@ struct SbomBuilder {
     root_version: Option<String>,
     root_bom_ref: String,
     components: BTreeMap<String, Component>,
-    root_dependencies: BTreeSet<String>,
+    dependency_edges: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl SbomBuilder {
@@ -3583,7 +3743,7 @@ impl SbomBuilder {
             root_version: None,
             root_bom_ref,
             components: BTreeMap::new(),
-            root_dependencies: BTreeSet::new(),
+            dependency_edges: BTreeMap::new(),
         }
     }
 
@@ -3609,7 +3769,18 @@ impl SbomBuilder {
     }
 
     fn add_root_dependency(&mut self, bom_ref: String) {
-        self.root_dependencies.insert(bom_ref);
+        self.add_dependency(self.root_bom_ref.clone(), bom_ref);
+    }
+
+    fn add_dependency(&mut self, parent_ref: String, child_ref: String) {
+        if parent_ref == child_ref {
+            return;
+        }
+
+        self.dependency_edges
+            .entry(parent_ref)
+            .or_default()
+            .insert(child_ref);
     }
 
     fn finish(self) -> Bom {
@@ -3623,14 +3794,20 @@ impl SbomBuilder {
         };
 
         let components = self.components.into_values().collect::<Vec<_>>();
-        let dependencies = if self.root_dependencies.is_empty() {
-            Vec::new()
-        } else {
-            vec![Dependency {
-                ref_: self.root_bom_ref,
-                depends_on: self.root_dependencies.into_iter().collect(),
-            }]
-        };
+        let dependencies = self
+            .dependency_edges
+            .into_iter()
+            .filter_map(|(ref_, depends_on)| {
+                if depends_on.is_empty() {
+                    None
+                } else {
+                    Some(Dependency {
+                        ref_,
+                        depends_on: depends_on.into_iter().collect(),
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
 
         Bom {
             bom_format: "CycloneDX",
@@ -3697,6 +3874,55 @@ fn pick_best_npm_ref(
         })
         .map(|(bom_ref, _)| bom_ref.clone())
         .or_else(|| refs.first().map(|(bom_ref, _)| bom_ref.clone()))
+}
+
+fn add_npm_package_lock_edges(
+    packages: &serde_json::Map<String, Value>,
+    refs_by_path: &HashMap<String, String>,
+    refs_by_name: &HashMap<String, Vec<(String, String)>>,
+    builder: &mut SbomBuilder,
+) {
+    for (package_path, package) in packages {
+        let Some(parent_ref) = refs_by_path.get(package_path).cloned() else {
+            continue;
+        };
+
+        for section in ["dependencies", "optionalDependencies", "peerDependencies"] {
+            let Some(dependencies) = package.get(section).and_then(Value::as_object) else {
+                continue;
+            };
+
+            for dep_name in dependencies.keys() {
+                let child_ref = npm_dependency_ref_for_parent(
+                    package_path,
+                    dep_name,
+                    refs_by_path,
+                    refs_by_name,
+                );
+                if let Some(child_ref) = child_ref {
+                    builder.add_dependency(parent_ref.clone(), child_ref);
+                }
+            }
+        }
+    }
+}
+
+fn npm_dependency_ref_for_parent(
+    parent_path: &str,
+    dep_name: &str,
+    refs_by_path: &HashMap<String, String>,
+    refs_by_name: &HashMap<String, Vec<(String, String)>>,
+) -> Option<String> {
+    let nested_path = if parent_path.is_empty() {
+        format!("node_modules/{dep_name}")
+    } else {
+        format!("{parent_path}/node_modules/{dep_name}")
+    };
+
+    refs_by_path
+        .get(&nested_path)
+        .cloned()
+        .or_else(|| pick_best_npm_ref(refs_by_name, dep_name))
 }
 
 fn spec_to_version_and_properties(spec: &str) -> (Option<String>, Vec<Property>) {
@@ -3871,6 +4097,49 @@ mod tests {
     }
 
     #[test]
+    fn package_lock_emits_transitive_dependency_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package-lock.json"),
+            serde_json::json!({
+                "name": "demo",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {
+                        "name": "demo",
+                        "version": "1.0.0",
+                        "dependencies": {
+                            "left-pad": "^1.3.0"
+                        }
+                    },
+                    "node_modules/left-pad": {
+                        "version": "1.3.0",
+                        "dependencies": {
+                            "repeat-string": "^1.6.1"
+                        }
+                    },
+                    "node_modules/repeat-string": {
+                        "version": "1.6.1"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+        assert!(bom
+            .components
+            .iter()
+            .any(|component| component.bom_ref == "pkg:npm/repeat-string@1.6.1"));
+        assert!(bom.dependencies.iter().any(|dependency| {
+            dependency.ref_ == "pkg:npm/left-pad@1.3.0"
+                && dependency.depends_on == vec!["pkg:npm/repeat-string@1.6.1"]
+        }));
+    }
+
+    #[test]
     fn parses_npm_shrinkwrap_components() {
         let dir = tempdir().unwrap();
         std::fs::write(
@@ -3967,6 +4236,54 @@ packages:
         assert_eq!(bom.components.len(), 1);
         assert_eq!(bom.components[0].bom_ref, "pkg:cargo/serde@1.0.217");
         assert_eq!(bom.dependencies[0].depends_on[0], "pkg:cargo/serde@1.0.217");
+    }
+
+    #[test]
+    fn cargo_lock_emits_transitive_dependency_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+
+            [dependencies]
+            serde = "1.0"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.lock"),
+            r#"
+            version = 3
+
+            [[package]]
+            name = "demo"
+            version = "0.1.0"
+            dependencies = [
+                "serde 1.0.217",
+            ]
+
+            [[package]]
+            name = "serde"
+            version = "1.0.217"
+            dependencies = [
+                "serde_derive 1.0.217",
+            ]
+
+            [[package]]
+            name = "serde_derive"
+            version = "1.0.217"
+            "#,
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+        assert!(bom.dependencies.iter().any(|dependency| {
+            dependency.ref_ == "pkg:cargo/serde@1.0.217"
+                && dependency.depends_on == vec!["pkg:cargo/serde_derive@1.0.217"]
+        }));
     }
 
     #[test]

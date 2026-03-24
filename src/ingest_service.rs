@@ -331,6 +331,12 @@ struct AdminApiKeyEventListParams {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct SbomRecordParams {
+    sbom_id: Option<String>,
+    git_commit: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct SbomInventoryParams {
     sbom_id: Option<String>,
     git_commit: Option<String>,
@@ -1655,6 +1661,7 @@ pub fn app(state: IngestState) -> Router {
         .route("/v1/ingest/runs", get(list_runs))
         .route("/v1/ingest/sboms", get(list_sboms))
         .route("/v1/projects/overview", get(projects_overview))
+        .route("/v1/sbom/document", get(sbom_document))
         .route("/v1/sbom/inventory", get(sbom_inventory))
         .route("/v1/sbom/timeline", get(sbom_timeline))
         .route("/v1/sbom/diff", get(sbom_diff))
@@ -2285,6 +2292,68 @@ async fn projects_overview(
             "sbom_uploads": sbom_records.len(),
         },
         "projects": items,
+    }))
+    .into_response()
+}
+
+async fn sbom_document(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<SbomRecordParams>,
+) -> Response {
+    let principal = match authorize(&state, &headers).await {
+        Ok(Some(principal)) => principal,
+        Ok(None) => {
+            return error_response(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to authorize request: {error}"),
+            );
+        }
+    };
+
+    let records = match load_index_records(&state, &principal, "sbom", None).await {
+        Ok(records) => records,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load sbom index: {error}"),
+            )
+        }
+    };
+
+    let Some(record) = resolve_sbom_record(
+        &records,
+        params.sbom_id.as_deref(),
+        params.git_commit.as_deref(),
+    ) else {
+        return error_response(StatusCode::NOT_FOUND, "sbom record not found");
+    };
+
+    let record_id = record
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let payload = match load_record_payload(&state, &principal, "sbom", &record_id).await {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return error_response(StatusCode::NOT_FOUND, "sbom record payload not found");
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to read sbom payload: {error}"),
+            )
+        }
+    };
+
+    Json(json!({
+        "status": "ok",
+        "record": record,
+        "sbom": payload.pointer("/payload/sbom").cloned().unwrap_or(Value::Null),
     }))
     .into_response()
 }
@@ -5062,7 +5131,7 @@ struct ListParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{self, Body};
     use axum::http::Request;
     use axum::routing::post;
     use tempfile::tempdir;
@@ -5663,6 +5732,170 @@ mod tests {
         assert_eq!(inventory["packages"][0]["ecosystem"].as_str(), Some("npm"));
         assert_eq!(inventory["packages"][1]["ecosystem"].as_str(), Some("pypi"));
         assert_eq!(inventory["packages"][0]["direct"].as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn sbom_inventory_can_include_transitive_packages() {
+        let state = test_state();
+        let app = app(state.clone());
+        let payload = json!({
+            "schema_version": "2026-03-13",
+            "upload_id": "upl_sbom_inventory_all_1",
+            "uploaded_at": "2026-03-13T01:00:00Z",
+            "tool": { "command": "sbom", "version": "0.2.9" },
+            "source": { "environment": "ci" },
+            "project": { "git_branch": "main", "git_commit": "abc999" },
+            "payload": {
+                "format": "cyclonedx-json",
+                "spec_version": "1.5",
+                "component_count": 3,
+                "direct_dependency_count": 1,
+                "manifest_sources": ["package-lock.json"],
+                "ecosystem_counts": { "npm": 3 },
+                "sbom": {
+                    "bomFormat": "CycloneDX",
+                    "specVersion": "1.5",
+                    "metadata": {
+                        "component": {
+                            "type": "application",
+                            "bom-ref": "pkg:generic/acme/demo@1.0.0",
+                            "name": "demo",
+                            "version": "1.0.0"
+                        }
+                    },
+                    "components": [
+                        { "bom-ref": "pkg:npm/chalk@5.4.1", "type": "library", "name": "chalk", "version": "5.4.1", "purl": "pkg:npm/chalk@5.4.1" },
+                        { "bom-ref": "pkg:npm/supports-color@9.4.0", "type": "library", "name": "supports-color", "version": "9.4.0", "purl": "pkg:npm/supports-color@9.4.0" },
+                        { "bom-ref": "pkg:npm/has-flag@4.0.0", "type": "library", "name": "has-flag", "version": "4.0.0", "purl": "pkg:npm/has-flag@4.0.0" }
+                    ],
+                    "dependencies": [
+                        {
+                            "ref": "pkg:generic/acme/demo@1.0.0",
+                            "dependsOn": ["pkg:npm/chalk@5.4.1"]
+                        },
+                        {
+                            "ref": "pkg:npm/chalk@5.4.1",
+                            "dependsOn": ["pkg:npm/supports-color@9.4.0"]
+                        },
+                        {
+                            "ref": "pkg:npm/supports-color@9.4.0",
+                            "dependsOn": ["pkg:npm/has-flag@4.0.0"]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let response = app
+            .clone()
+            .oneshot(auth_request("/v1/ingest/sbom", payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let inventory_request = Request::builder()
+            .uri("/v1/sbom/inventory?git_commit=abc999&direct_only=false")
+            .method("GET")
+            .header(header::AUTHORIZATION, "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let inventory_response = app.oneshot(inventory_request).await.unwrap();
+        assert_eq!(inventory_response.status(), StatusCode::OK);
+        let inventory_body = axum::body::to_bytes(inventory_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let inventory: Value = serde_json::from_slice(&inventory_body).unwrap();
+
+        assert_eq!(inventory["summary"]["package_count"].as_u64(), Some(3));
+        assert_eq!(
+            inventory["summary"]["direct_package_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(inventory["packages"].as_array().unwrap().len(), 3);
+        assert_eq!(inventory["packages"][0]["direct"].as_bool(), Some(true));
+        assert_eq!(inventory["packages"][1]["direct"].as_bool(), Some(false));
+        assert_eq!(inventory["packages"][2]["direct"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn sbom_document_returns_stored_cyclonedx_payload() {
+        let state = test_state();
+        let app = app(state.clone());
+
+        let payload = json!({
+            "schema_version": "2026-03-13",
+            "upload_id": "upl_sbom_document_1",
+            "uploaded_at": "2026-03-13T01:00:00Z",
+            "tool": { "command": "sbom", "version": "0.2.9" },
+            "source": { "environment": "ci" },
+            "project": {
+                "git_branch": "main",
+                "git_commit": "doc123",
+                "repo_url": "https://example.com/acme/platform.git"
+            },
+            "payload": {
+                "format": "cyclonedx-json",
+                "spec_version": "1.5",
+                "component_count": 1,
+                "direct_dependency_count": 1,
+                "ecosystem_counts": { "npm": 1 },
+                "manifest_sources": ["package-lock.json"],
+                "sbom": {
+                    "bomFormat": "CycloneDX",
+                    "specVersion": "1.5",
+                    "serialNumber": "urn:uuid:sbom-document",
+                    "version": 1,
+                    "metadata": {
+                        "component": {
+                            "type": "application",
+                            "name": "platform",
+                            "purl": "pkg:generic/platform"
+                        }
+                    },
+                    "components": [
+                        {
+                            "bom-ref": "pkg:npm/react@18.2.0",
+                            "type": "library",
+                            "name": "react",
+                            "version": "18.2.0",
+                            "purl": "pkg:npm/react@18.2.0"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let ingest = app
+            .clone()
+            .oneshot(auth_request("/v1/ingest/sbom", payload))
+            .await
+            .unwrap();
+        assert_eq!(ingest.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sbom/document?git_commit=doc123")
+                    .header(header::AUTHORIZATION, "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"].as_str(), Some("ok"));
+        assert_eq!(json["record"]["git_commit"].as_str(), Some("doc123"));
+        assert_eq!(json["sbom"]["bomFormat"].as_str(), Some("CycloneDX"));
+        assert_eq!(json["sbom"]["components"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            json["sbom"]["components"][0]["name"].as_str(),
+            Some("react")
+        );
     }
 
     #[tokio::test]

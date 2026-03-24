@@ -3624,6 +3624,9 @@ async fn persist_payload(
 
     if let Some(metadata_store) = &state.metadata_store {
         metadata_store
+            .ensure_org_and_project(org_slug, project_slug)
+            .await?;
+        metadata_store
             .persist_index_record(kind, record_id, &payload_path, index_record)
             .await?;
         if kind == "sbom" {

@@ -3,7 +3,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tracing::{info, warn, error, instrument};
 use bytes::Bytes;
 use chrono::Utc;
 use deadpool_postgres::{
@@ -21,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{NoTls, Row};
+use tracing::{error, info, instrument, warn};
 use ulid::Ulid;
 
 #[derive(Clone)]
@@ -3319,7 +3319,10 @@ async fn ingest(
     let principal = match authorize(&state, &headers).await {
         Ok(Some(principal)) => principal,
         Ok(None) => {
-            warn!(kind, "ingest request rejected: missing or invalid bearer token");
+            warn!(
+                kind,
+                "ingest request rejected: missing or invalid bearer token"
+            );
             return error_response(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
         }
         Err(error) => {

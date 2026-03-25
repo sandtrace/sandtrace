@@ -49,6 +49,43 @@ Current endpoints exposed by `sandtrace-ingest`:
 | `GET` | `/v1/sbom/security-alerts/history` | Return persisted vulnerable package-change history with filters for project, commit, kind, and package identity |
 | `GET` | `/v1/dashboard/overview` | Return dashboard-ready aggregate counts |
 
+## API Versioning Policy
+
+All ingest API endpoints are prefixed with `/v1/`. This section defines when and how the version changes.
+
+### Compatibility guarantees for `/v1/`
+
+- **Additive changes are non-breaking.** New fields in response JSON, new optional query parameters, and new endpoints under `/v1/` can be added without a version bump. Clients must ignore unknown fields.
+- **Removing or renaming a response field is breaking.** This requires a new version (`/v2/`).
+- **Changing the type of an existing field is breaking.** (e.g., string → number, object → array).
+- **Changing the meaning of an existing field is breaking.**
+- **Removing an endpoint is breaking.** Deprecated endpoints remain available for at least 90 days after deprecation notice.
+
+### When to create `/v2/`
+
+A new API version is warranted when:
+1. The SBOM schema changes in a way that alters existing field semantics
+2. Authentication model changes (e.g., replacing Bearer tokens with a different scheme)
+3. A fundamental change to the ingest payload format
+
+### Deprecation process
+
+1. Add a `Sunset` HTTP header to deprecated endpoints with the removal date
+2. Log warnings when deprecated endpoints are called
+3. Document the migration path in release notes
+4. Maintain deprecated endpoints for a minimum of 90 days
+
+### CLI-to-cloud compatibility
+
+The CLI (`sandtrace audit --upload`, `sandtrace sbom --upload`) and the ingest service must stay compatible across releases. The CLI always targets the latest API version it was built against. When a breaking change is introduced:
+1. The new CLI version targets `/v2/`
+2. The ingest service supports both `/v1/` and `/v2/` simultaneously
+3. Older CLI versions continue working against `/v1/` until sunset
+
+### Current status
+
+All endpoints are `/v1/`. No breaking changes are planned.
+
 ## Environment variables
 
 ### CLI uploader

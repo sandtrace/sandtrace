@@ -2735,7 +2735,7 @@ async fn sbom_advisories(
         })
         .collect::<Vec<_>>();
     let query_limit = params.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let (advisory_results, cache_stats) =
+    let (mut advisory_results, cache_stats) =
         match query_osv_advisories(&state, &filtered_packages, query_limit).await {
             Ok(results) => results,
             Err(error) => {
@@ -2745,6 +2745,13 @@ async fn sbom_advisories(
                 )
             }
         };
+
+    // Enrich vulnerable packages with dependency paths from root
+    if let Ok(payload) = load_record_payload(&state, &principal, "sbom", &record_id).await {
+        if let Some(sbom) = payload.pointer("/payload/sbom") {
+            enrich_advisories_with_paths(&mut advisory_results, sbom);
+        }
+    }
 
     let affected_package_count = advisory_results
         .iter()
@@ -5145,6 +5152,117 @@ struct ListParams {
     limit: Option<u32>,
 }
 
+/// Trace the shortest dependency path from root to a target package.
+///
+/// Given a CycloneDX SBOM `dependencies` array:
+/// ```json
+/// [{"ref": "root", "dependsOn": ["A"]}, {"ref": "A", "dependsOn": ["B"]}]
+/// ```
+/// Returns the path from root to target as a vec of bom-refs: `["root", "A", "B"]`.
+fn trace_dependency_path(sbom: &Value, target_bom_ref: &str) -> Vec<String> {
+    let dependencies = match sbom.get("dependencies").and_then(Value::as_array) {
+        Some(deps) => deps,
+        None => return Vec::new(),
+    };
+
+    // Build forward adjacency map: parent -> [children]
+    let mut forward: HashMap<String, Vec<String>> = HashMap::new();
+    for dep in dependencies {
+        let parent = match dep.get("ref").and_then(Value::as_str) {
+            Some(r) => r.to_string(),
+            None => continue,
+        };
+        let children: Vec<String> = dep
+            .get("dependsOn")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect();
+        forward.insert(parent, children);
+    }
+
+    // Find root ref (from metadata/component/bom-ref)
+    let root_ref = sbom
+        .pointer("/metadata/component/bom-ref")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            sbom.pointer("/metadata/component/purl")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default()
+        .to_string();
+
+    if root_ref.is_empty() || target_bom_ref.is_empty() {
+        return Vec::new();
+    }
+
+    if root_ref == target_bom_ref {
+        return vec![root_ref];
+    }
+
+    // BFS from root to target
+    let mut queue = std::collections::VecDeque::new();
+    let mut parent_map: HashMap<String, String> = HashMap::new();
+    queue.push_back(root_ref.clone());
+    parent_map.insert(root_ref.clone(), String::new());
+
+    while let Some(current) = queue.pop_front() {
+        if current == target_bom_ref {
+            // Reconstruct path
+            let mut path = Vec::new();
+            let mut node = target_bom_ref.to_string();
+            while !node.is_empty() {
+                path.push(node.clone());
+                node = parent_map.get(&node).cloned().unwrap_or_default();
+            }
+            path.reverse();
+            return path;
+        }
+
+        if let Some(children) = forward.get(&current) {
+            for child in children {
+                if !parent_map.contains_key(child) {
+                    parent_map.insert(child.clone(), current.clone());
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    Vec::new() // No path found
+}
+
+/// Enrich advisory results with dependency paths from the SBOM.
+fn enrich_advisories_with_paths(advisory_results: &mut [Value], sbom: &Value) {
+    for result in advisory_results.iter_mut() {
+        let vuln_count = result
+            .get("vulnerability_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if vuln_count == 0 {
+            continue;
+        }
+
+        let bom_ref = result
+            .get("bom_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if bom_ref.is_empty() {
+            continue;
+        }
+
+        let path = trace_dependency_path(sbom, &bom_ref);
+        if !path.is_empty() {
+            result["dependency_path"] = json!(path);
+            result["dependency_depth"] = json!(path.len() - 1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7337,5 +7455,60 @@ mod tests {
             Some("web")
         );
         assert_eq!(accepted["record"]["project_slug"].as_str(), Some("web"));
+    }
+
+    #[test]
+    fn trace_dependency_path_finds_shortest_path_to_vulnerable_package() {
+        let sbom = json!({
+            "metadata": {
+                "component": {
+                    "bom-ref": "pkg:npm/my-app@1.0.0",
+                    "name": "my-app",
+                    "version": "1.0.0"
+                }
+            },
+            "dependencies": [
+                {"ref": "pkg:npm/my-app@1.0.0", "dependsOn": ["pkg:npm/express@4.21.0"]},
+                {"ref": "pkg:npm/express@4.21.0", "dependsOn": ["pkg:npm/body-parser@1.20.3", "pkg:npm/accepts@1.3.8"]},
+                {"ref": "pkg:npm/body-parser@1.20.3", "dependsOn": ["pkg:npm/qs@6.13.0"]},
+                {"ref": "pkg:npm/qs@6.13.0", "dependsOn": []},
+                {"ref": "pkg:npm/accepts@1.3.8", "dependsOn": []}
+            ]
+        });
+
+        // Direct dependency
+        let path = trace_dependency_path(&sbom, "pkg:npm/express@4.21.0");
+        assert_eq!(path, vec!["pkg:npm/my-app@1.0.0", "pkg:npm/express@4.21.0"]);
+
+        // Second-level transitive
+        let path = trace_dependency_path(&sbom, "pkg:npm/body-parser@1.20.3");
+        assert_eq!(
+            path,
+            vec![
+                "pkg:npm/my-app@1.0.0",
+                "pkg:npm/express@4.21.0",
+                "pkg:npm/body-parser@1.20.3"
+            ]
+        );
+
+        // Third-level transitive (root → express → body-parser → qs)
+        let path = trace_dependency_path(&sbom, "pkg:npm/qs@6.13.0");
+        assert_eq!(
+            path,
+            vec![
+                "pkg:npm/my-app@1.0.0",
+                "pkg:npm/express@4.21.0",
+                "pkg:npm/body-parser@1.20.3",
+                "pkg:npm/qs@6.13.0"
+            ]
+        );
+
+        // Nonexistent package returns empty
+        let path = trace_dependency_path(&sbom, "pkg:npm/nonexistent@0.0.0");
+        assert!(path.is_empty());
+
+        // Root itself returns single-element path
+        let path = trace_dependency_path(&sbom, "pkg:npm/my-app@1.0.0");
+        assert_eq!(path, vec!["pkg:npm/my-app@1.0.0"]);
     }
 }

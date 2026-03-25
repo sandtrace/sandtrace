@@ -616,6 +616,22 @@ impl MetadataStore {
 
                 CREATE INDEX IF NOT EXISTS ingest_sbom_security_alerts_lookup_idx
                     ON ingest_sbom_security_alerts (org_slug, project_slug, occurred_at DESC, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS project_vulnerability_scans (
+                    org_slug TEXT NOT NULL,
+                    project_slug TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    git_commit TEXT,
+                    total_vulnerable_packages INTEGER NOT NULL DEFAULT 0,
+                    total_vulnerabilities INTEGER NOT NULL DEFAULT 0,
+                    scanned_package_count INTEGER NOT NULL DEFAULT 0,
+                    scan_results JSONB NOT NULL DEFAULT '[]'::JSONB,
+                    scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (org_slug, project_slug),
+                    FOREIGN KEY (org_slug, project_slug)
+                        REFERENCES projects(org_slug, project_slug)
+                        ON DELETE CASCADE
+                );
                 "#,
             )
             .await?;
@@ -1664,6 +1680,88 @@ impl MetadataStore {
 
         Ok(rows.into_iter().map(|row| row.get::<_, Value>(0)).collect())
     }
+
+    async fn list_all_projects(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let rows = self
+            .client
+            .query("SELECT org_slug, project_slug FROM projects", &[])
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect())
+    }
+
+    async fn upsert_vulnerability_scan(
+        &self,
+        org_slug: &str,
+        project_slug: &str,
+        record_id: &str,
+        git_commit: Option<&str>,
+        vulnerable_packages: i32,
+        total_vulnerabilities: i32,
+        scanned_packages: i32,
+        scan_results: &Value,
+    ) -> anyhow::Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO project_vulnerability_scans
+                    (org_slug, project_slug, record_id, git_commit,
+                     total_vulnerable_packages, total_vulnerabilities,
+                     scanned_package_count, scan_results, scanned_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                ON CONFLICT (org_slug, project_slug) DO UPDATE SET
+                    record_id = EXCLUDED.record_id,
+                    git_commit = EXCLUDED.git_commit,
+                    total_vulnerable_packages = EXCLUDED.total_vulnerable_packages,
+                    total_vulnerabilities = EXCLUDED.total_vulnerabilities,
+                    scanned_package_count = EXCLUDED.scanned_package_count,
+                    scan_results = EXCLUDED.scan_results,
+                    scanned_at = NOW()
+                "#,
+                &[
+                    &org_slug,
+                    &project_slug,
+                    &record_id,
+                    &git_commit,
+                    &vulnerable_packages,
+                    &total_vulnerabilities,
+                    &scanned_packages,
+                    scan_results,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn load_vulnerability_scan(
+        &self,
+        org_slug: &str,
+        project_slug: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT json_build_object(
+                    'org_slug', org_slug,
+                    'project_slug', project_slug,
+                    'record_id', record_id,
+                    'git_commit', git_commit,
+                    'total_vulnerable_packages', total_vulnerable_packages,
+                    'total_vulnerabilities', total_vulnerabilities,
+                    'scanned_package_count', scanned_package_count,
+                    'scanned_at', scanned_at
+                )
+                FROM project_vulnerability_scans
+                WHERE org_slug = $1 AND project_slug = $2
+                "#,
+                &[&org_slug, &project_slug],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, Value>(0)))
+    }
 }
 
 pub fn app(state: IngestState) -> Router {
@@ -1704,6 +1802,7 @@ pub fn app(state: IngestState) -> Router {
         )
         .route("/v1/sbom/security-alerts", get(sbom_security_alerts))
         .route("/v1/dashboard/overview", get(dashboard_overview))
+        .route("/v1/admin/rescan-advisories", post(admin_rescan_advisories))
         .with_state(state)
 }
 
@@ -2305,9 +2404,27 @@ async fn projects_overview(
     });
     items.truncate(limit);
 
-    // Keep the overview endpoint cheap and deterministic. Detailed package and
-    // security alert counts are derived in the SBOM-specific endpoints instead of
-    // running package diffs and OSV lookups inline during dashboard load.
+    // Enrich projects with persisted vulnerability scan data (from periodic rescan)
+    if let Some(metadata_store) = &state.metadata_store {
+        for project in &mut items {
+            let project_slug = string_field(project, "project_slug");
+            if let Ok(Some(scan)) = metadata_store
+                .load_vulnerability_scan(principal.org_slug.as_str(), &project_slug)
+                .await
+            {
+                project["total_vulnerable_packages"] = scan
+                    .get("total_vulnerable_packages")
+                    .cloned()
+                    .unwrap_or(json!(0));
+                project["total_vulnerabilities"] = scan
+                    .get("total_vulnerabilities")
+                    .cloned()
+                    .unwrap_or(json!(0));
+                project["last_advisory_scan_at"] =
+                    scan.get("scanned_at").cloned().unwrap_or(Value::Null);
+            }
+        }
+    }
 
     Json(json!({
         "status": "ok",
@@ -3166,6 +3283,172 @@ async fn sbom_timeline(
             "security_alert_count": security_alert_count,
         },
         "commits": commits,
+    }))
+    .into_response()
+}
+
+/// Rescan all projects' latest SBOMs against OSV for current vulnerabilities.
+/// Called periodically (e.g., daily cron) to catch newly published CVEs.
+async fn admin_rescan_advisories(State(state): State<IngestState>, headers: HeaderMap) -> Response {
+    // Require admin token
+    let admin_token = match &state.admin_token {
+        Some(token) => token.clone(),
+        None => {
+            return error_response(StatusCode::NOT_FOUND, "admin endpoints not configured");
+        }
+    };
+    let provided = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if provided != admin_token {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid admin token");
+    }
+
+    let Some(metadata_store) = &state.metadata_store else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database not configured — vulnerability scanning requires Postgres",
+        );
+    };
+
+    let projects = match metadata_store.list_all_projects().await {
+        Ok(projects) => projects,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to list projects: {error}"),
+            );
+        }
+    };
+
+    info!(project_count = projects.len(), "starting advisory rescan");
+
+    let mut scanned = 0u32;
+    let mut total_vulns_found = 0u32;
+    let mut errors = Vec::new();
+
+    for (org_slug, project_slug) in &projects {
+        let principal = ApiPrincipal {
+            api_key: String::new(),
+            org_slug: org_slug.clone(),
+            project_slug: Some(project_slug.clone()),
+            actor: Some("admin-rescan".to_string()),
+        };
+
+        // Find the latest SBOM record for this project
+        let latest_record = match find_sbom_record_fast(&state, &principal, None, None).await {
+            Ok(Some(record)) => record,
+            Ok(None) => continue, // No SBOMs for this project
+            Err(error) => {
+                errors.push(format!("{org_slug}/{project_slug}: {error}"));
+                continue;
+            }
+        };
+
+        let record_id = latest_record
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let git_commit = latest_record
+            .get("git_commit")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        // Load packages for this SBOM
+        let packages = match load_sbom_packages_for_record(&state, &principal, &record_id).await {
+            Ok(packages) => packages,
+            Err(error) => {
+                errors.push(format!("{org_slug}/{project_slug}: {error}"));
+                continue;
+            }
+        };
+
+        if packages.is_empty() {
+            continue;
+        }
+
+        // Query OSV for all packages (not just direct, not just changed)
+        let (advisory_results, _cache_stats) =
+            match query_osv_advisories(&state, &packages, packages.len()).await {
+                Ok(results) => results,
+                Err(error) => {
+                    errors.push(format!(
+                        "{org_slug}/{project_slug}: OSV query failed: {error}"
+                    ));
+                    continue;
+                }
+            };
+
+        let vulnerable_count = advisory_results
+            .iter()
+            .filter(|r| {
+                r.get("vulnerability_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            })
+            .count() as i32;
+        let vuln_total: i32 = advisory_results
+            .iter()
+            .map(|r| {
+                r.get("vulnerabilities")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len() as i32)
+                    .unwrap_or(0)
+            })
+            .sum();
+
+        // Persist scan results
+        let scan_results = json!(advisory_results
+            .iter()
+            .filter(|r| r
+                .get("vulnerability_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0)
+            .collect::<Vec<_>>());
+
+        if let Err(error) = metadata_store
+            .upsert_vulnerability_scan(
+                org_slug,
+                project_slug,
+                &record_id,
+                git_commit.as_deref(),
+                vulnerable_count,
+                vuln_total,
+                packages.len() as i32,
+                &scan_results,
+            )
+            .await
+        {
+            errors.push(format!(
+                "{org_slug}/{project_slug}: persist failed: {error}"
+            ));
+            continue;
+        }
+
+        scanned += 1;
+        total_vulns_found += vuln_total as u32;
+
+        info!(
+            org = org_slug.as_str(),
+            project = project_slug.as_str(),
+            vulnerable_packages = vulnerable_count,
+            total_vulnerabilities = vuln_total,
+            scanned_packages = packages.len(),
+            "project advisory rescan complete"
+        );
+    }
+
+    Json(json!({
+        "status": "ok",
+        "projects_scanned": scanned,
+        "total_projects": projects.len(),
+        "total_vulnerabilities_found": total_vulns_found,
+        "errors": errors,
     }))
     .into_response()
 }

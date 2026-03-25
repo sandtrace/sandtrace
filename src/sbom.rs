@@ -5340,4 +5340,106 @@ let package = Package(
             .iter()
             .any(|component| component.bom_ref == "pkg:npm/elysia"));
     }
+
+    #[test]
+    fn pnpm_lock_emits_transitive_dependency_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::json!({
+                "name": "pnpm-transitive-test",
+                "version": "1.0.0",
+                "dependencies": {
+                    "express": "4.21.0"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // pnpm v9 lockfile: packages has resolution metadata,
+        // snapshots has the actual dependency graph.
+        // When packages has no dependency keys, the code falls back to snapshots.
+        // Use a v6-style lockfile where packages contains dependency info directly.
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            r#"lockfileVersion: '6.0'
+
+importers:
+  .:
+    dependencies:
+      express:
+        specifier: 4.21.0
+        version: 4.21.0
+
+packages:
+  /accepts@1.3.8:
+    resolution: {integrity: sha512-test}
+
+  /body-parser@1.20.3:
+    resolution: {integrity: sha512-test}
+    dependencies:
+      qs: 6.13.0
+
+  /express@4.21.0:
+    resolution: {integrity: sha512-test}
+    dependencies:
+      accepts: 1.3.8
+      body-parser: 1.20.3
+
+  /qs@6.13.0:
+    resolution: {integrity: sha512-test}
+"#,
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+
+        // express should be a root dependency
+        let root = bom
+            .dependencies
+            .iter()
+            .find(|dep| dep.ref_ == bom.metadata.component.bom_ref)
+            .expect("root dependency node");
+        assert!(
+            root.depends_on
+                .iter()
+                .any(|dep| dep == "pkg:npm/express@4.21.0"),
+            "express should be a root dependency"
+        );
+
+        // express should depend on accepts and body-parser (transitive edges)
+        let express_dep = bom
+            .dependencies
+            .iter()
+            .find(|dep| dep.ref_ == "pkg:npm/express@4.21.0")
+            .expect("express dependency node");
+        assert!(
+            express_dep
+                .depends_on
+                .iter()
+                .any(|dep| dep == "pkg:npm/accepts@1.3.8"),
+            "express should depend on accepts"
+        );
+        assert!(
+            express_dep
+                .depends_on
+                .iter()
+                .any(|dep| dep == "pkg:npm/body-parser@1.20.3"),
+            "express should depend on body-parser"
+        );
+
+        // body-parser should depend on qs (second-level transitive)
+        let body_parser_dep = bom
+            .dependencies
+            .iter()
+            .find(|dep| dep.ref_ == "pkg:npm/body-parser@1.20.3")
+            .expect("body-parser dependency node");
+        assert!(
+            body_parser_dep
+                .depends_on
+                .iter()
+                .any(|dep| dep == "pkg:npm/qs@6.13.0"),
+            "body-parser should depend on qs"
+        );
+    }
 }

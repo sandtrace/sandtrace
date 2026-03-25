@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{NoTls, Row};
+use tracing::{error, info, instrument, warn};
 use ulid::Ulid;
 
 #[derive(Clone)]
@@ -3318,9 +3319,14 @@ async fn ingest(
     let principal = match authorize(&state, &headers).await {
         Ok(Some(principal)) => principal,
         Ok(None) => {
+            warn!(
+                kind,
+                "ingest request rejected: missing or invalid bearer token"
+            );
             return error_response(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
         }
         Err(error) => {
+            error!(kind, %error, "ingest authorization failed");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to authorize request: {error}"),
@@ -3328,7 +3334,15 @@ async fn ingest(
         }
     };
 
+    info!(
+        kind,
+        org = %principal.org_slug,
+        project = principal.project_slug.as_deref().unwrap_or("unscoped"),
+        "ingest request authorized"
+    );
+
     if let Err(message) = validate_payload(kind, &payload) {
+        warn!(kind, %message, "ingest payload validation failed");
         return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
@@ -3409,10 +3423,10 @@ async fn ingest(
                 )
                 .await
                 {
-                    log::warn!(
-                        "failed to persist sbom security alerts for {}: {}",
-                        record_id,
-                        error
+                    warn!(
+                        %record_id,
+                        %error,
+                        "failed to persist sbom security alerts"
                     );
                 }
             }

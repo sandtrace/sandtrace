@@ -74,6 +74,10 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 # EDR: Async trait support
 async-trait = "0.1"
 
+# Structured logging for ingest service
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
 # EDR: Futures utilities (StreamExt for signal handling)
 futures-util = "0.3"
 

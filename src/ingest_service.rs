@@ -1394,6 +1394,36 @@ impl MetadataStore {
         Ok(rows.into_iter().map(|row| row.get::<_, Value>(0)).collect())
     }
 
+    /// Find a single SBOM record by git_commit or record_id using a SQL WHERE clause
+    /// instead of loading all records and scanning in memory.
+    async fn find_sbom_record(
+        &self,
+        org_slug: &str,
+        project_slug: Option<&str>,
+        record_id: Option<&str>,
+        git_commit: Option<&str>,
+    ) -> anyhow::Result<Option<Value>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT index_record
+                FROM ingest_records
+                WHERE org_slug = $1
+                  AND kind = 'sbom'
+                  AND ($2::TEXT IS NULL OR project_slug = $2)
+                  AND ($3::TEXT IS NULL OR record_id = $3)
+                  AND ($4::TEXT IS NULL OR index_record->>'git_commit' = $4)
+                ORDER BY uploaded_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                "#,
+                &[&org_slug, &project_slug, &record_id, &git_commit],
+            )
+            .await?;
+
+        Ok(row.map(|r| r.get::<_, Value>(0)))
+    }
+
     async fn load_sbom_packages(
         &self,
         org_slug: &str,
@@ -2315,22 +2345,24 @@ async fn sbom_document(
         }
     };
 
-    let records = match load_index_records(&state, &principal, "sbom", None).await {
-        Ok(records) => records,
+    let record = match find_sbom_record_fast(
+        &state,
+        &principal,
+        params.sbom_id.as_deref(),
+        params.git_commit.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "sbom record not found");
+        }
         Err(error) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to load sbom index: {error}"),
             )
         }
-    };
-
-    let Some(record) = resolve_sbom_record(
-        &records,
-        params.sbom_id.as_deref(),
-        params.git_commit.as_deref(),
-    ) else {
-        return error_response(StatusCode::NOT_FOUND, "sbom record not found");
     };
 
     let record_id = record
@@ -2377,22 +2409,24 @@ async fn sbom_inventory(
         }
     };
 
-    let records = match load_index_records(&state, &principal, "sbom", None).await {
-        Ok(records) => records,
+    let record = match find_sbom_record_fast(
+        &state,
+        &principal,
+        params.sbom_id.as_deref(),
+        params.git_commit.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "sbom record not found");
+        }
         Err(error) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to load sbom index: {error}"),
             )
         }
-    };
-
-    let Some(record) = resolve_sbom_record(
-        &records,
-        params.sbom_id.as_deref(),
-        params.git_commit.as_deref(),
-    ) else {
-        return error_response(StatusCode::NOT_FOUND, "sbom record not found");
     };
 
     let record_id = record
@@ -2695,8 +2729,18 @@ async fn sbom_advisories(
         }
     };
 
-    let records = match load_index_records(&state, &principal, "sbom", None).await {
-        Ok(records) => records,
+    let record = match find_sbom_record_fast(
+        &state,
+        &principal,
+        params.sbom_id.as_deref(),
+        params.git_commit.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "sbom record not found");
+        }
         Err(error) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2705,15 +2749,7 @@ async fn sbom_advisories(
         }
     };
 
-    let Some(record) = resolve_sbom_record(
-        &records,
-        params.sbom_id.as_deref(),
-        params.git_commit.as_deref(),
-    ) else {
-        return error_response(StatusCode::NOT_FOUND, "sbom record not found");
-    };
-
-    let record_id = string_field(record, "id");
+    let record_id = string_field(&record, "id");
     let packages = match load_sbom_packages_for_record(&state, &principal, &record_id).await {
         Ok(packages) => packages,
         Err(error) => {
@@ -4135,6 +4171,37 @@ async fn load_index_records(
     }
 
     Ok(records)
+}
+
+/// Find a single SBOM record by sbom_id or git_commit without loading all records.
+/// Uses Postgres WHERE clause when available, falls back to file scan + filter.
+async fn find_sbom_record_fast(
+    state: &IngestState,
+    principal: &ApiPrincipal,
+    sbom_id: Option<&str>,
+    git_commit: Option<&str>,
+) -> std::io::Result<Option<Value>> {
+    if sbom_id.is_none() && git_commit.is_none() {
+        // No filter — fall back to loading all and taking first (latest)
+        let records = load_index_records(state, principal, "sbom", Some(1)).await?;
+        return Ok(records.into_iter().next());
+    }
+
+    if let Some(metadata_store) = &state.metadata_store {
+        return metadata_store
+            .find_sbom_record(
+                principal.org_slug.as_str(),
+                principal.project_slug.as_deref(),
+                sbom_id,
+                git_commit,
+            )
+            .await
+            .map_err(std::io::Error::other);
+    }
+
+    // File-based fallback: load all and filter
+    let records = load_index_records(state, principal, "sbom", None).await?;
+    Ok(resolve_sbom_record(&records, sbom_id, git_commit).cloned())
 }
 
 async fn read_json_file(path: &Path) -> std::io::Result<Value> {

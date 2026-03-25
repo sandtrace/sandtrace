@@ -1,0 +1,141 @@
+name: 'Sandtrace Audit'
+description: 'Scan dependencies for obfuscated code, supply-chain attacks, and suspicious packages'
+author: 'Closed Circuit Inc'
+
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  path:
+    description: 'Directory to scan (default: repository root)'
+    required: false
+    default: '.'
+  severity:
+    description: 'Minimum severity to report: low, medium, high, critical'
+    required: false
+    default: 'medium'
+  fail-on-findings:
+    description: 'Fail the workflow when findings are detected (true/false)'
+    required: false
+    default: 'true'
+  version:
+    description: 'Sandtrace version to use (default: latest release)'
+    required: false
+    default: 'latest'
+  upload-sarif:
+    description: 'Upload SARIF results to GitHub Code Scanning (true/false)'
+    required: false
+    default: 'true'
+
+outputs:
+  finding-count:
+    description: 'Number of findings detected'
+    value: ${{ steps.audit.outputs.finding_count }}
+  sarif-file:
+    description: 'Path to the generated SARIF file'
+    value: ${{ steps.audit.outputs.sarif_file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect platform
+      id: platform
+      shell: bash
+      run: |
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
+          aarch64) TARGET="aarch64-unknown-linux-musl" ;;
+          *)       echo "::error::Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
+        echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve version
+      id: version
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          VERSION=$(gh release view --repo sandtrace/sandtrace --json tagName -q .tagName 2>/dev/null || echo "")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine latest sandtrace version"
+            exit 1
+          fi
+        else
+          VERSION="v${{ inputs.version }}"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Installing sandtrace $VERSION"
+
+    - name: Install sandtrace
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        TARGET="${{ steps.platform.outputs.target }}"
+        VERSION_NUM="${VERSION#v}"
+        ARCHIVE="sandtrace-${VERSION}-${TARGET}.tar.gz"
+        URL="https://github.com/sandtrace/sandtrace/releases/download/${VERSION}/${ARCHIVE}"
+
+        echo "Downloading $URL"
+        curl -fsSL "$URL" -o "/tmp/${ARCHIVE}"
+        tar xzf "/tmp/${ARCHIVE}" -C /tmp
+        chmod +x /tmp/sandtrace
+        echo "/tmp" >> "$GITHUB_PATH"
+
+    - name: Run audit
+      id: audit
+      shell: bash
+      run: |
+        SARIF_FILE="${RUNNER_TEMP}/sandtrace-results.sarif"
+        echo "sarif_file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+
+        # Run SARIF scan (always, for upload)
+        sandtrace audit "${{ inputs.path }}" \
+          --format sarif \
+          --severity "${{ inputs.severity }}" \
+          --no-color \
+          > "$SARIF_FILE" 2>/dev/null || true
+
+        # Count findings from SARIF
+        FINDING_COUNT=0
+        if [ -f "$SARIF_FILE" ]; then
+          FINDING_COUNT=$(python3 -c "
+        import json, sys
+        try:
+            data = json.load(open('$SARIF_FILE'))
+            print(len(data.get('runs', [{}])[0].get('results', [])))
+        except:
+            print(0)
+        " 2>/dev/null || echo "0")
+        fi
+        echo "finding_count=$FINDING_COUNT" >> "$GITHUB_OUTPUT"
+
+        # Run terminal output for annotations
+        echo "::group::Sandtrace Audit Results"
+        sandtrace audit "${{ inputs.path }}" \
+          --format terminal \
+          --severity "${{ inputs.severity }}" \
+          --no-color \
+          2>&1 || true
+        echo "::endgroup::"
+
+        # Report summary
+        if [ "$FINDING_COUNT" -gt 0 ]; then
+          echo "::warning::Sandtrace found $FINDING_COUNT finding(s)"
+          if [ "${{ inputs.fail-on-findings }}" = "true" ]; then
+            echo "::error::Sandtrace audit failed — $FINDING_COUNT finding(s) detected. Set fail-on-findings: false to continue."
+            exit 1
+          fi
+        else
+          echo "Sandtrace audit passed — no findings"
+        fi
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: ${{ inputs.upload-sarif == 'true' && always() }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.audit.outputs.sarif_file }}
+        category: sandtrace
+      continue-on-error: true

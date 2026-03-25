@@ -367,7 +367,7 @@ fn print_sarif_report(findings: &[AuditFinding]) -> Result<(), SandtraceError> {
                 "driver": {
                     "name": "sandtrace",
                     "version": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/example/sandtrace"
+                    "informationUri": "https://github.com/sandtrace/sandtrace"
                 }
             },
             "results": findings.iter().map(|f| {

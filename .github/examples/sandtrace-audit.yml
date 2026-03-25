@@ -1,0 +1,24 @@
+# Example: Add this to .github/workflows/sandtrace.yml in your repo
+name: Sandtrace Audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write  # Required for SARIF upload to Code Scanning
+
+jobs:
+  audit:
+    name: Supply Chain Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sandtrace Audit
+        uses: sandtrace/sandtrace@v0
+        with:
+          severity: medium
+          fail-on-findings: true

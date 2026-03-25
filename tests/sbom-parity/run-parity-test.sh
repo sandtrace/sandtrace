@@ -67,6 +67,10 @@ for c in components:
     # Normalize name: lowercase, strip leading @
     norm_name = name.lower()
 
+    # Normalize version: strip leading 'v' prefix (syft keeps it, sandtrace strips it)
+    if version.startswith('v') and len(version) > 1 and version[1:2].isdigit():
+        version = version[1:]
+
     key = f'{eco}|{norm_name}|{version}'
     if key not in seen:
         seen.add(key)

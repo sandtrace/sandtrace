@@ -3370,9 +3370,11 @@ async fn admin_rescan_advisories(State(state): State<IngestState>, headers: Head
             continue;
         }
 
-        // Query OSV for all packages (not just direct, not just changed)
+        // Query OSV for all packages with cache bypass (TTL=0 forces fresh queries)
+        let mut rescan_state = state.clone();
+        rescan_state.osv_cache_ttl_hours = 0;
         let (advisory_results, _cache_stats) =
-            match query_osv_advisories(&state, &packages, packages.len()).await {
+            match query_osv_advisories(&rescan_state, &packages, packages.len()).await {
                 Ok(results) => results,
                 Err(error) => {
                     errors.push(format!(

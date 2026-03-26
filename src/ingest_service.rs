@@ -5187,9 +5187,42 @@ fn normalize_osv_result(package: &SbomPackage, result: &Value) -> Value {
         .into_iter()
         .filter_map(|vuln| {
             vuln.get("id").and_then(Value::as_str).map(|id| {
+                // Extract severity: prefer database_specific.severity (human-readable),
+                // fall back to parsing CVSS score from the severity array
+                let db_severity = vuln
+                    .pointer("/database_specific/severity")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_uppercase());
+                let cvss_severity =
+                    vuln.get("severity")
+                        .and_then(Value::as_array)
+                        .and_then(|sevs| {
+                            sevs.iter().find_map(|s| {
+                                s.get("score")
+                                    .and_then(Value::as_str)
+                                    .and_then(|score| cvss_to_severity(score))
+                            })
+                        });
+                let severity = db_severity
+                    .or(cvss_severity)
+                    .unwrap_or_else(|| "UNKNOWN".to_string());
+
+                let aliases = vuln
+                    .get("aliases")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let summary = vuln
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+
                 json!({
                     "id": id,
                     "modified": vuln.get("modified").cloned().unwrap_or(Value::Null),
+                    "severity": severity,
+                    "summary": summary,
+                    "aliases": aliases,
                 })
             })
         })
@@ -5252,6 +5285,39 @@ fn osv_query_key(package: &SbomPackage) -> String {
     let query = build_osv_query(package);
     let serialized = serde_json::to_vec(&query).unwrap_or_default();
     sha256_bytes_hex(&serialized)
+}
+
+/// Parse a CVSS v3 vector string and return a severity label.
+/// Example: "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H" → extract base score → "HIGH"
+fn cvss_to_severity(cvss_string: &str) -> Option<String> {
+    // CVSS score is not directly in the vector string — we need to estimate from the metrics.
+    // However, the OSV API sometimes includes the score as a separate field.
+    // For simplicity, parse the vector to estimate severity from the attack complexity and impact.
+    // A more accurate approach: look for a numeric score in database_specific.
+    // Fall back to a heuristic based on the vector components.
+    if !cvss_string.starts_with("CVSS:") {
+        return None;
+    }
+
+    let metrics: std::collections::HashMap<&str, &str> = cvss_string
+        .split('/')
+        .filter_map(|part| part.split_once(':'))
+        .collect();
+
+    // Estimate severity from impact metrics (C, I, A)
+    let high_impacts = ["C", "I", "A"]
+        .iter()
+        .filter(|metric| metrics.get(**metric) == Some(&"H"))
+        .count();
+
+    let severity = match high_impacts {
+        3 => "CRITICAL",
+        2 => "HIGH",
+        1 => "MEDIUM",
+        _ => "LOW",
+    };
+
+    Some(severity.to_string())
 }
 
 fn osv_ecosystem(ecosystem: &str) -> Option<String> {

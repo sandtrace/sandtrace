@@ -5149,9 +5149,41 @@ async fn query_osv_advisories(
             .cloned()
             .unwrap_or_default();
 
+        // Collect all unique vuln IDs from the batch results so we can fetch full details
+        let mut vuln_ids: Vec<String> = Vec::new();
+        for result in &results {
+            if let Some(vulns) = result.get("vulns").and_then(Value::as_array) {
+                for vuln in vulns {
+                    if let Some(id) = vuln.get("id").and_then(Value::as_str) {
+                        if !vuln_ids.contains(&id.to_string()) {
+                            vuln_ids.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fetch full vulnerability details (severity, summary, aliases) for each vuln ID
+        let mut vuln_details: HashMap<String, Value> = HashMap::new();
+        for vuln_id in &vuln_ids {
+            if let Ok(response) = client
+                .get(format!(
+                    "{}/v1/vulns/{}",
+                    state.osv_api_url.trim_end_matches('/'),
+                    vuln_id
+                ))
+                .send()
+                .await
+            {
+                if let Ok(detail) = response.json::<Value>().await {
+                    vuln_details.insert(vuln_id.clone(), detail);
+                }
+            }
+        }
+
         for (index, (query_key, package)) in uncached_packages.into_iter().enumerate() {
             let result = results.get(index).cloned().unwrap_or_else(|| json!({}));
-            let advisory_result = normalize_osv_result(package, &result);
+            let advisory_result = normalize_osv_result(package, &result, &vuln_details);
             if let Some(metadata_store) = &state.metadata_store {
                 metadata_store
                     .store_osv_cache_entry(&query_key, package, &advisory_result)
@@ -5178,7 +5210,11 @@ async fn query_osv_advisories(
     Ok((packages_with_results, stats))
 }
 
-fn normalize_osv_result(package: &SbomPackage, result: &Value) -> Value {
+fn normalize_osv_result(
+    package: &SbomPackage,
+    result: &Value,
+    vuln_details: &HashMap<String, Value>,
+) -> Value {
     let mut vulnerabilities = result
         .get("vulns")
         .and_then(Value::as_array)
@@ -5187,33 +5223,36 @@ fn normalize_osv_result(package: &SbomPackage, result: &Value) -> Value {
         .into_iter()
         .filter_map(|vuln| {
             vuln.get("id").and_then(Value::as_str).map(|id| {
+                // Look up full details from individual /v1/vulns/{id} fetch
+                let detail = vuln_details.get(id);
+
                 // Extract severity: prefer database_specific.severity (human-readable),
                 // fall back to parsing CVSS score from the severity array
-                let db_severity = vuln
-                    .pointer("/database_specific/severity")
+                let db_severity = detail
+                    .and_then(|d| d.pointer("/database_specific/severity"))
                     .and_then(Value::as_str)
                     .map(|s| s.to_uppercase());
-                let cvss_severity =
-                    vuln.get("severity")
-                        .and_then(Value::as_array)
-                        .and_then(|sevs| {
-                            sevs.iter().find_map(|s| {
-                                s.get("score")
-                                    .and_then(Value::as_str)
-                                    .and_then(|score| cvss_to_severity(score))
-                            })
-                        });
+                let cvss_severity = detail
+                    .and_then(|d| d.get("severity"))
+                    .and_then(Value::as_array)
+                    .and_then(|sevs| {
+                        sevs.iter().find_map(|s| {
+                            s.get("score")
+                                .and_then(Value::as_str)
+                                .and_then(|score| cvss_to_severity(score))
+                        })
+                    });
                 let severity = db_severity
                     .or(cvss_severity)
                     .unwrap_or_else(|| "UNKNOWN".to_string());
 
-                let aliases = vuln
-                    .get("aliases")
+                let aliases = detail
+                    .and_then(|d| d.get("aliases"))
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let summary = vuln
-                    .get("summary")
+                let summary = detail
+                    .and_then(|d| d.get("summary"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
 

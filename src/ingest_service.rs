@@ -2887,7 +2887,7 @@ async fn sbom_advisories(
                 && (!params.direct_only.unwrap_or(false) || package.direct)
         })
         .collect::<Vec<_>>();
-    let query_limit = params.limit.unwrap_or(100).clamp(1, 200) as usize;
+    let query_limit = params.limit.unwrap_or(200).clamp(1, 1000) as usize;
     let (mut advisory_results, cache_stats) =
         match query_osv_advisories(&state, &filtered_packages, query_limit).await {
             Ok(results) => results,

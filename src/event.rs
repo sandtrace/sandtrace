@@ -76,6 +76,8 @@ pub struct TraceSummary {
     pub network_attempts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub suspicious_activity: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub blocked_accesses: Vec<String>,
 }
 
 // --- EDR event types ---

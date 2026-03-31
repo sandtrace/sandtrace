@@ -36,38 +36,71 @@ impl SandboxConfig {
 
 /// Apply all sandbox layers in the child process after fork.
 /// This must be called in the child before execve.
+///
+/// In trace-only mode, namespace creation is best-effort — if the kernel
+/// blocks it (e.g., Ubuntu 24.04 AppArmor userns restrictions), we skip
+/// the sandbox and continue with ptrace tracing only.
 pub fn apply_child_sandbox(config: &SandboxConfig) -> Result<()> {
-    // 1. User namespace - must be first to gain capabilities
-    namespaces::setup_user_namespace()?;
+    let sandbox_available = try_setup_namespaces(config);
 
-    // 2. Mount namespace - restrict filesystem view
-    namespaces::setup_mount_namespace()?;
-
-    // 3. PID namespace - hide host processes
-    namespaces::setup_pid_namespace()?;
-
-    // 4. Network namespace - no network by default
-    if !config.policy.network.allow {
-        namespaces::setup_network_namespace()?;
+    if !sandbox_available && !config.trace_only {
+        // Full sandbox mode requires namespaces — can't proceed without them
+        return Err(SandboxError::NamespaceCreation(nix::Error::EPERM).into());
     }
 
-    // 5. PR_SET_NO_NEW_PRIVS - prevent privilege escalation
-    capabilities::set_no_new_privs()?;
+    if sandbox_available {
+        // 5. PR_SET_NO_NEW_PRIVS - prevent privilege escalation
+        capabilities::set_no_new_privs()?;
 
-    // 6. Landlock - kernel-level filesystem access control (if not trace-only)
-    if !config.trace_only {
-        landlock::apply_landlock_rules(&config.policy)?;
-    }
+        // 6. Landlock - kernel-level filesystem access control (if not trace-only)
+        if !config.trace_only {
+            landlock::apply_landlock_rules(&config.policy)?;
+        }
 
-    // 7. seccomp-bpf - block dangerous syscalls (if not trace-only)
-    if !config.trace_only {
-        seccomp::install_seccomp_filter(&config.policy)?;
+        // 7. seccomp-bpf - block dangerous syscalls (if not trace-only)
+        if !config.trace_only {
+            seccomp::install_seccomp_filter(&config.policy)?;
+        }
+    } else {
+        eprintln!(
+            "Warning: namespace sandbox unavailable on this kernel — \
+             running with ptrace tracing only (no filesystem/network isolation)"
+        );
     }
 
     // 8. ptrace TRACEME + SIGSTOP - signal readiness to tracer
     setup_ptrace_traceme()?;
 
     Ok(())
+}
+
+/// Try to set up namespace isolation. Returns true if successful, false if
+/// the kernel blocked namespace creation (common on Ubuntu 24.04+ with
+/// AppArmor userns restrictions).
+fn try_setup_namespaces(config: &SandboxConfig) -> bool {
+    // 1. User namespace - must be first to gain capabilities
+    if namespaces::setup_user_namespace().is_err() {
+        return false;
+    }
+
+    // 2. Mount namespace - restrict filesystem view
+    if namespaces::setup_mount_namespace().is_err() {
+        return false;
+    }
+
+    // 3. PID namespace - hide host processes
+    if namespaces::setup_pid_namespace().is_err() {
+        return false;
+    }
+
+    // 4. Network namespace - no network by default
+    if !config.policy.network.allow {
+        if namespaces::setup_network_namespace().is_err() {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn setup_ptrace_traceme() -> Result<()> {

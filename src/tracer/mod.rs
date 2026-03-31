@@ -10,6 +10,7 @@ use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, ForkResult, Pid};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -49,6 +50,7 @@ struct TraceStats {
     files_accessed: std::collections::HashSet<String>,
     network_attempts: std::collections::HashSet<String>,
     suspicious_activity: Vec<String>,
+    blocked_accesses: Vec<String>,
 }
 
 impl Tracer {
@@ -291,6 +293,17 @@ impl Tracer {
                         category: syscalls::categorize_syscall(&syscall_info.name),
                     };
 
+                    // Track permission-denied file accesses (Landlock blocks)
+                    if return_value == -13 /* EACCES */ || return_value == -1
+                    /* EPERM */
+                    {
+                        if let Some(decoded) = &event.args.decoded {
+                            if let Some(path) = decoded.get("path").and_then(|v| v.as_str()) {
+                                decoder::track_blocked_file_access(&mut self.stats, path);
+                            }
+                        }
+                    }
+
                     self.output.emit_event(TraceEvent::Syscall(event))?;
 
                     self.stats.total_syscalls += 1;
@@ -404,6 +417,7 @@ impl Tracer {
             files_accessed: self.stats.files_accessed.drain().collect(),
             network_attempts: self.stats.network_attempts.drain().collect(),
             suspicious_activity: self.stats.suspicious_activity.clone(),
+            blocked_accesses: self.stats.blocked_accesses.clone(),
         };
 
         self.last_summary = Some(summary.clone());

@@ -364,18 +364,49 @@ fn decode_sockaddr(pid: Pid, addr: u64, len: usize) -> Result<String, Box<dyn st
     }
 }
 
-fn track_file_access(stats: &mut TraceStats, path: &str) {
-    // Track sensitive file accesses
-    let sensitive_paths = [".ssh", "/etc/shadow", "/etc/passwd", ".env", ".bashrc"];
+pub fn track_blocked_file_access(stats: &mut TraceStats, path: &str) {
+    track_file_access_with_result(stats, path, false);
+}
 
-    for sensitive in &sensitive_paths {
+fn track_file_access(stats: &mut TraceStats, path: &str) {
+    track_file_access_with_result(stats, path, true);
+}
+
+fn track_file_access_with_result(stats: &mut TraceStats, path: &str, success: bool) {
+    let sensitive_patterns = [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".azure",
+        ".config/gcloud",
+        "/etc/shadow",
+        "/etc/gshadow",
+        ".env",
+        ".bashrc",
+        ".bash_history",
+        ".npmrc",
+        ".pypirc",
+        ".docker/config.json",
+        ".kube/config",
+    ];
+
+    for sensitive in &sensitive_patterns {
         if path.contains(sensitive) {
-            let msg = format!("Attempted to access sensitive file: {}", path);
+            let status = if success { "accessed" } else { "BLOCKED" };
+            let msg = format!("{} sensitive file: {}", status, path);
             if !stats.suspicious_activity.contains(&msg) {
                 stats.suspicious_activity.push(msg);
             }
         }
     }
 
-    stats.files_accessed.insert(path.to_string());
+    if success {
+        stats.files_accessed.insert(path.to_string());
+    } else {
+        // Track blocked access attempts separately
+        let msg = format!("Permission denied: {}", path);
+        if !stats.blocked_accesses.contains(&msg) {
+            stats.blocked_accesses.push(msg);
+        }
+    }
 }

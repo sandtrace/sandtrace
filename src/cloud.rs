@@ -288,6 +288,7 @@ fn build_run_payload(
             "exit_code": summary.exit_code,
             "files_accessed": normalized_files,
             "network_attempts": summary.network_attempts,
+            "blocked_accesses": summary.blocked_accesses,
             "suspicious_activity": summary
                 .suspicious_activity
                 .iter()

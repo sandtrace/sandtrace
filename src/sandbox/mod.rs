@@ -48,24 +48,33 @@ pub fn apply_child_sandbox(config: &SandboxConfig) -> Result<()> {
         return Err(SandboxError::NamespaceCreation(nix::Error::EPERM).into());
     }
 
-    if sandbox_available {
-        // 5. PR_SET_NO_NEW_PRIVS - prevent privilege escalation
-        capabilities::set_no_new_privs()?;
+    // 5. PR_SET_NO_NEW_PRIVS - prevent privilege escalation
+    // Required for Landlock enforcement even without namespaces
+    capabilities::set_no_new_privs()?;
 
-        // 6. Landlock - kernel-level filesystem access control (if not trace-only)
+    if sandbox_available {
+        // Full sandbox: namespaces + Landlock + seccomp
         if !config.trace_only {
             landlock::apply_landlock_rules(&config.policy)?;
-        }
-
-        // 7. seccomp-bpf - block dangerous syscalls (if not trace-only)
-        if !config.trace_only {
             seccomp::install_seccomp_filter(&config.policy)?;
         }
-    } else {
+    } else if landlock::check_landlock_support() {
+        // Fallback: no namespaces but Landlock works — apply filesystem restrictions
         eprintln!(
-            "Warning: namespace sandbox unavailable on this kernel — \
-             running with ptrace tracing only (no filesystem/network isolation)"
+            "Warning: namespace sandbox unavailable — using Landlock filesystem \
+             isolation only (no network/PID isolation)"
         );
+        landlock::apply_landlock_rules(&config.policy)?;
+    } else {
+        if config.trace_only {
+            eprintln!(
+                "Warning: no sandbox available on this kernel — \
+                 running with ptrace tracing only"
+            );
+        } else {
+            // Can't sandbox at all — refuse to run in full mode
+            return Err(SandboxError::NamespaceCreation(nix::Error::EPERM).into());
+        }
     }
 
     // 8. ptrace TRACEME + SIGSTOP - signal readiness to tracer

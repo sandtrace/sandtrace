@@ -98,6 +98,13 @@ pub fn run_audit_with_config(
         obfuscation::supply_chain::check_install_scripts(&args.target);
     findings.append(&mut install_script_findings);
 
+    // Supply chain configuration checks (Rules 21-22)
+    let mut npmrc_findings = obfuscation::supply_chain::check_npmrc_script_policy(&args.target);
+    findings.append(&mut npmrc_findings);
+
+    let mut unpinned_findings = obfuscation::supply_chain::check_unpinned_versions(&args.target);
+    findings.append(&mut unpinned_findings);
+
     // AI toolchain checks (MCP injection, rogue servers, git template poisoning)
     let mut mcp_findings = obfuscation::ai_toolchain::check_mcp_config_tampering(&args.target);
     findings.append(&mut mcp_findings);

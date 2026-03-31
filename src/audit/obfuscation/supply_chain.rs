@@ -406,6 +406,183 @@ pub fn check_install_scripts(dir: &Path) -> Vec<AuditFinding> {
     findings
 }
 
+/// Check if .npmrc allows install script execution (or doesn't explicitly disable it).
+/// When ignore-scripts is not set to true, postinstall scripts run automatically
+/// during npm install, enabling supply-chain attacks.
+pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    // Only relevant if there's a package.json
+    let pkg_json = dir.join("package.json");
+    if !pkg_json.exists() {
+        return findings;
+    }
+
+    let npmrc_path = dir.join(".npmrc");
+    if npmrc_path.exists() {
+        let content = match std::fs::read_to_string(&npmrc_path) {
+            Ok(c) => c,
+            Err(_) => return findings,
+        };
+        let file_path = npmrc_path.to_string_lossy().to_string();
+
+        // Check if ignore-scripts is explicitly set to true
+        let has_ignore_scripts = content.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#')
+                && !trimmed.starts_with(';')
+                && trimmed.contains("ignore-scripts")
+                && trimmed.contains("true")
+        });
+
+        if !has_ignore_scripts {
+            findings.push(AuditFinding {
+                file_path,
+                line_number: None,
+                rule_id: "supply-chain-npmrc-scripts-enabled".to_string(),
+                severity: Severity::Medium,
+                description: ".npmrc does not set ignore-scripts=true — postinstall scripts will run automatically during npm install".to_string(),
+                matched_pattern: "ignore-scripts not set".to_string(),
+                context_lines: vec![
+                    "Add 'ignore-scripts=true' to .npmrc to prevent automatic script execution".to_string(),
+                    "Run scripts explicitly with 'npm run postinstall' when needed".to_string(),
+                ],
+            });
+        }
+    } else {
+        // No .npmrc at all — scripts are enabled by default
+        let file_path = pkg_json.to_string_lossy().to_string();
+        findings.push(AuditFinding {
+            file_path,
+            line_number: None,
+            rule_id: "supply-chain-npmrc-missing".to_string(),
+            severity: Severity::Low,
+            description: "No .npmrc found — npm install scripts are enabled by default. Consider adding .npmrc with ignore-scripts=true".to_string(),
+            matched_pattern: ".npmrc missing".to_string(),
+            context_lines: vec![
+                "Create .npmrc with 'ignore-scripts=true' to prevent supply-chain attacks via postinstall scripts".to_string(),
+            ],
+        });
+    }
+
+    findings
+}
+
+/// Check for unpinned dependency versions in package.json.
+/// Unpinned versions (^, ~, *, >=, latest) let attackers publish a malicious
+/// patch that auto-installs. Pinned versions (exact like "1.2.3") are safer.
+pub fn check_unpinned_versions(dir: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    let pkg_json = dir.join("package.json");
+    if !pkg_json.exists() {
+        return findings;
+    }
+
+    let content = match std::fs::read_to_string(&pkg_json) {
+        Ok(c) => c,
+        Err(_) => return findings,
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return findings,
+    };
+
+    let file_path = pkg_json.to_string_lossy().to_string();
+    let dep_sections = ["dependencies", "devDependencies", "optionalDependencies"];
+    let mut unpinned_count = 0u32;
+    let mut unpinned_examples = Vec::new();
+
+    for section in &dep_sections {
+        if let Some(deps) = json.get(*section).and_then(|v| v.as_object()) {
+            for (name, version) in deps {
+                if let Some(ver) = version.as_str() {
+                    if is_unpinned_version(ver) {
+                        unpinned_count += 1;
+                        if unpinned_examples.len() < 5 {
+                            unpinned_examples.push(format!("{}@{}", name, ver));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check composer.json
+    let composer_json = dir.join("composer.json");
+    if composer_json.exists() {
+        if let Ok(content) = std::fs::read_to_string(&composer_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                let composer_file = composer_json.to_string_lossy().to_string();
+                let composer_sections = ["require", "require-dev"];
+
+                for section in &composer_sections {
+                    if let Some(deps) = json.get(*section).and_then(|v| v.as_object()) {
+                        for (name, version) in deps {
+                            if let Some(ver) = version.as_str() {
+                                if is_unpinned_version(ver) {
+                                    unpinned_count += 1;
+                                    if unpinned_examples.len() < 5 {
+                                        unpinned_examples.push(format!("{}@{}", name, ver));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if unpinned_count > 0
+                    && !findings
+                        .iter()
+                        .any(|f: &AuditFinding| f.file_path == composer_file)
+                {
+                    // Will be added below as a combined finding
+                }
+            }
+        }
+    }
+
+    if unpinned_count > 0 {
+        let severity = if unpinned_count > 10 {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
+
+        findings.push(AuditFinding {
+            file_path,
+            line_number: None,
+            rule_id: "supply-chain-unpinned-versions".to_string(),
+            severity,
+            description: format!(
+                "{} dependencies use unpinned versions (^, ~, *, >=). Attackers can publish malicious patches that auto-install",
+                unpinned_count
+            ),
+            matched_pattern: "unpinned version range".to_string(),
+            context_lines: unpinned_examples,
+        });
+    }
+
+    findings
+}
+
+/// Check if a version string is unpinned (allows automatic updates).
+fn is_unpinned_version(version: &str) -> bool {
+    let v = version.trim();
+    // Pinned: exact version like "1.2.3" or "v1.2.3"
+    // Unpinned: ^, ~, *, >=, >, latest, next, canary, workspace:*, etc.
+    v.starts_with('^')
+        || v.starts_with('~')
+        || v.starts_with('>')
+        || v == "*"
+        || v == "latest"
+        || v == "next"
+        || v == "canary"
+        || v.contains("||")
+        || v.contains(' ')
+}
+
 fn check_package_typosquat(name: &str, popular: &[&str], file_path: &str) -> Option<AuditFinding> {
     let name_lower = name.to_lowercase();
 

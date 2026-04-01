@@ -637,7 +637,11 @@ fn check_package_typosquat(name: &str, popular: &[&str], file_path: &str) -> Opt
 
 fn truncate_line(line: &str) -> String {
     if line.len() > 120 {
-        format!("{}...", &line[..120])
+        let mut end = 120;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &line[..end])
     } else {
         line.to_string()
     }

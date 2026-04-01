@@ -1,4 +1,5 @@
 pub mod obfuscation;
+pub mod registry_checks;
 pub mod scanner;
 
 use crate::cli::AuditArgs;
@@ -116,6 +117,12 @@ pub fn run_audit_with_config(
     let mut git_template_findings =
         obfuscation::ai_toolchain::check_global_git_template_poisoning(&args.target);
     findings.append(&mut git_template_findings);
+
+    // Deep registry checks (--deep flag: verify packages exist, check version age, downloads)
+    if args.deep {
+        let mut deep_findings = registry_checks::run_deep_checks(&args.target);
+        findings.append(&mut deep_findings);
+    }
 
     // Filter by severity
     findings.retain(|f| f.severity >= min_severity);

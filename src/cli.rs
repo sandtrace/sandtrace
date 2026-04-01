@@ -136,6 +136,11 @@ pub struct AuditArgs {
     /// Disable colored terminal output
     #[arg(long)]
     pub no_color: bool,
+
+    /// Enable deep checks — query package registries for existence, version age,
+    /// download counts, and known vulnerabilities. Requires network access.
+    #[arg(long)]
+    pub deep: bool,
 }
 
 #[derive(Parser, Debug)]

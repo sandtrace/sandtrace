@@ -741,7 +741,11 @@ fn strip_inline_comment(line: &str) -> String {
 
 fn truncate_line(line: &str) -> String {
     if line.len() > 120 {
-        format!("{}...", &line[..120])
+        let mut end = 120;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &line[..end])
     } else {
         line.to_string()
     }
@@ -750,7 +754,11 @@ fn truncate_line(line: &str) -> String {
 fn truncate_config(value: &serde_json::Value) -> String {
     let s = value.to_string();
     if s.len() > 200 {
-        format!("{}...", &s[..200])
+        let mut end = 200;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s
     }

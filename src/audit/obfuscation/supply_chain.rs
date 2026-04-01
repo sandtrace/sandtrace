@@ -437,7 +437,7 @@ pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
 
         if !has_ignore_scripts {
             findings.push(AuditFinding {
-                file_path,
+                file_path: file_path.clone(),
                 line_number: None,
                 rule_id: "supply-chain-npmrc-scripts-enabled".to_string(),
                 severity: Severity::Medium,
@@ -449,6 +449,29 @@ pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
                 ],
             });
         }
+
+        // Check for minVersionAge (npm v11+ feature) — blocks recently published versions
+        let has_min_version_age = content.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#')
+                && !trimmed.starts_with(';')
+                && (trimmed.contains("minVersionAge") || trimmed.contains("min-version-age"))
+        });
+
+        if !has_min_version_age {
+            findings.push(AuditFinding {
+                file_path,
+                line_number: None,
+                rule_id: "supply-chain-npmrc-no-version-age-gate".to_string(),
+                severity: Severity::Medium,
+                description: ".npmrc does not set minVersionAge — newly published malicious versions can install immediately. The LiteLLM attack (March 2026) would have been blocked by a 7-day age gate".to_string(),
+                matched_pattern: "minVersionAge not set".to_string(),
+                context_lines: vec![
+                    "Add 'minVersionAge=7d' to .npmrc to block versions published less than 7 days ago".to_string(),
+                    "Requires npm v11+. Prevents supply-chain attacks via compromised publish credentials".to_string(),
+                ],
+            });
+        }
     } else {
         // No .npmrc at all — scripts are enabled by default
         let file_path = pkg_json.to_string_lossy().to_string();
@@ -456,11 +479,13 @@ pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
             file_path,
             line_number: None,
             rule_id: "supply-chain-npmrc-missing".to_string(),
-            severity: Severity::Low,
-            description: "No .npmrc found — npm install scripts are enabled by default. Consider adding .npmrc with ignore-scripts=true".to_string(),
+            severity: Severity::Medium,
+            description: "No .npmrc found — npm install scripts are enabled by default and no version age gate is set".to_string(),
             matched_pattern: ".npmrc missing".to_string(),
             context_lines: vec![
-                "Create .npmrc with 'ignore-scripts=true' to prevent supply-chain attacks via postinstall scripts".to_string(),
+                "Create .npmrc with these security settings:".to_string(),
+                "  ignore-scripts=true".to_string(),
+                "  minVersionAge=7d".to_string(),
             ],
         });
     }

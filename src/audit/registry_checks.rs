@@ -10,6 +10,78 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+/// High-trust, high-frequency npm packages that publish often.
+/// These skip the version-age check because they'd almost always trigger it.
+const TRUSTED_NPM_PACKAGES: &[&str] = &[
+    // Core frameworks
+    "vue",
+    "react",
+    "react-dom",
+    "next",
+    "nuxt",
+    "svelte",
+    "@sveltejs/kit",
+    "angular",
+    "@angular/core",
+    "@angular/cli",
+    // TypeScript ecosystem
+    "typescript",
+    "typescript-eslint",
+    "@typescript-eslint/parser",
+    "@typescript-eslint/eslint-plugin",
+    "@types/node",
+    "@types/react",
+    "@types/react-dom",
+    // Build tools
+    "vite",
+    "esbuild",
+    "webpack",
+    "rollup",
+    "@rollup/rollup-linux-x64-gnu",
+    "@rollup/rollup-linux-arm64-gnu",
+    "@rollup/rollup-darwin-x64",
+    "@rollup/rollup-darwin-arm64",
+    "@rollup/rollup-win32-x64-msvc",
+    "@rollup/rollup-win32-arm64-msvc",
+    "turbo",
+    "laravel-vite-plugin",
+    // Linting / formatting
+    "eslint",
+    "prettier",
+    // Testing
+    "vitest",
+    "jest",
+    "playwright",
+    "@playwright/test",
+    // Major ecosystem packages
+    "tailwindcss",
+    "@tailwindcss/vite",
+    "postcss",
+    "autoprefixer",
+    "axios",
+    "lodash",
+    "date-fns",
+    "zod",
+];
+
+/// High-trust composer packages that publish frequently.
+const TRUSTED_COMPOSER_PACKAGES: &[&str] = &[
+    "laravel/framework",
+    "laravel/tinker",
+    "laravel/sanctum",
+    "laravel/passport",
+    "laravel/horizon",
+    "laravel/telescope",
+    "laravel/pint",
+    "symfony/console",
+    "symfony/http-kernel",
+    "symfony/routing",
+    "phpunit/phpunit",
+    "pestphp/pest",
+    "nunomaduro/larastan",
+    "phpstan/phpstan",
+];
+
 /// Run all registry-based deep checks on dependencies found in manifests.
 pub fn run_deep_checks(dir: &Path) -> Vec<AuditFinding> {
     let client = Client::builder()
@@ -158,6 +230,7 @@ fn check_npm_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<Audi
         };
 
         // Check version age — when was the latest version published?
+        let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
         if let Some(time) = body.get("time").and_then(Value::as_object) {
             // Get the latest version's publish time
             if let Some(latest_version) = body
@@ -167,8 +240,8 @@ fn check_npm_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<Audi
             {
                 if let Some(publish_date) = time.get(latest_version).and_then(Value::as_str) {
                     if let Some(age_hours) = parse_age_hours(publish_date) {
-                        if age_hours < 168 {
-                            // Less than 7 days
+                        if age_hours < 168 && !is_trusted {
+                            // Less than 7 days, not a trusted high-frequency package
                             findings.push(AuditFinding {
                                 file_path: file_path.clone(),
                                 line_number: None,

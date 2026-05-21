@@ -628,6 +628,14 @@ pub(crate) struct DepInfo {
     pub is_transitive: bool,
 }
 
+/// Per-package check result. `fetch_failed=true` indicates a transient
+/// registry error (5xx, timeout, network) — NOT a 404, which is itself a
+/// legitimate finding (deep-package-not-found).
+struct CheckResult {
+    findings: Vec<AuditFinding>,
+    fetch_failed: bool,
+}
+
 async fn check_npm_packages(
     client: Client,
     deps: Vec<DepInfo>,
@@ -636,6 +644,7 @@ async fn check_npm_packages(
 ) -> Vec<AuditFinding> {
     let file_path = dir.join("package.json").to_string_lossy().to_string();
     let mut tasks = tokio::task::JoinSet::new();
+    let total = deps.len();
     for dep in deps {
         let client = client.clone();
         let sem = sem.clone();
@@ -643,48 +652,67 @@ async fn check_npm_packages(
         tasks.spawn(async move {
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
-                Err(_) => return Vec::new(),
+                Err(_) => {
+                    return CheckResult {
+                        findings: Vec::new(),
+                        fetch_failed: true,
+                    };
+                }
             };
             check_one_npm_package(&client, &dep, &file_path).await
         });
     }
     let mut findings = Vec::new();
+    let mut failed = 0usize;
     while let Some(res) = tasks.join_next().await {
-        if let Ok(mut f) = res {
-            findings.append(&mut f);
+        match res {
+            Ok(mut r) => {
+                findings.append(&mut r.findings);
+                if r.fetch_failed {
+                    failed += 1;
+                }
+            }
+            Err(_) => failed += 1,
         }
+    }
+    if let Some(f) = partial_scan_finding("npm", failed, total, &file_path) {
+        findings.push(f);
     }
     findings
 }
 
-async fn check_one_npm_package(
-    client: &Client,
-    dep: &DepInfo,
-    file_path: &str,
-) -> Vec<AuditFinding> {
+async fn check_one_npm_package(client: &Client, dep: &DepInfo, file_path: &str) -> CheckResult {
     // Cache hit: use stored RFC 3339 dates, recompute age now. No HTTP.
     let meta = if let Some(cached) = registry_cache::read("npm", &dep.name) {
         cached
     } else {
         match fetch_npm_meta(client, &dep.name).await {
             FetchOutcome::Missing => {
-                return vec![AuditFinding {
-                    file_path: file_path.to_string(),
-                    line_number: None,
-                    rule_id: "deep-package-not-found".to_string(),
-                    severity: Severity::Critical,
-                    description: format!(
-                        "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
-                        dep.name
-                    ),
-                    matched_pattern: "package not found on registry".to_string(),
-                    context_lines: vec![format!(
-                        "Remove '{}' from package.json or verify the correct package name",
-                        dep.name
-                    )],
-                }];
+                return CheckResult {
+                    findings: vec![AuditFinding {
+                        file_path: file_path.to_string(),
+                        line_number: None,
+                        rule_id: "deep-package-not-found".to_string(),
+                        severity: Severity::Critical,
+                        description: format!(
+                            "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
+                            dep.name
+                        ),
+                        matched_pattern: "package not found on registry".to_string(),
+                        context_lines: vec![format!(
+                            "Remove '{}' from package.json or verify the correct package name",
+                            dep.name
+                        )],
+                    }],
+                    fetch_failed: false,
+                };
             }
-            FetchOutcome::Error => return Vec::new(),
+            FetchOutcome::Error => {
+                return CheckResult {
+                    findings: Vec::new(),
+                    fetch_failed: true,
+                };
+            }
             FetchOutcome::Ok(m) => {
                 registry_cache::write(&m);
                 m
@@ -692,7 +720,48 @@ async fn check_one_npm_package(
         }
     };
 
-    findings_from_npm_meta(&meta, dep, file_path)
+    CheckResult {
+        findings: findings_from_npm_meta(&meta, dep, file_path),
+        fetch_failed: false,
+    }
+}
+
+/// Graduated partial-scan finding. Bucketed by failure-rate:
+/// - <50%: Info — registry hiccups are normal, surface for visibility
+/// - >=50%: Medium — audit is half-blind, attacker timing window real
+/// - >=90%: High — effectively no signal, CI should fail
+fn partial_scan_finding(
+    registry: &str,
+    failed: usize,
+    total: usize,
+    file_path: &str,
+) -> Option<AuditFinding> {
+    if failed == 0 || total == 0 {
+        return None;
+    }
+    let pct = (failed * 100) / total;
+    let severity = if pct >= 90 {
+        Severity::High
+    } else if pct >= 50 {
+        Severity::Medium
+    } else {
+        Severity::Info
+    };
+    Some(AuditFinding {
+        file_path: file_path.to_string(),
+        line_number: None,
+        rule_id: "deep-partial-scan".to_string(),
+        severity,
+        description: format!(
+            "Deep check partial scan: {}/{} {} packages unreachable ({}%). Findings below may be incomplete; transient registry errors hide real risks during the gap",
+            failed, total, registry, pct
+        ),
+        matched_pattern: "registry fetch failures".to_string(),
+        context_lines: vec![
+            format!("Re-run with network access restored, or trust the partial result if registry is known-down."),
+            format!("Cache (~/.cache/sandtrace/registry-meta) entries skip HTTP for fresh keys."),
+        ],
+    })
 }
 
 enum FetchOutcome {
@@ -850,6 +919,7 @@ async fn check_composer_packages(
 ) -> Vec<AuditFinding> {
     let file_path = dir.join("composer.json").to_string_lossy().to_string();
     let mut tasks = tokio::task::JoinSet::new();
+    let total = deps.len();
     for dep in deps {
         let client = client.clone();
         let sem = sem.clone();
@@ -857,16 +927,31 @@ async fn check_composer_packages(
         tasks.spawn(async move {
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
-                Err(_) => return Vec::new(),
+                Err(_) => {
+                    return CheckResult {
+                        findings: Vec::new(),
+                        fetch_failed: true,
+                    };
+                }
             };
             check_one_composer_package(&client, &dep, &file_path).await
         });
     }
     let mut findings = Vec::new();
+    let mut failed = 0usize;
     while let Some(res) = tasks.join_next().await {
-        if let Ok(mut f) = res {
-            findings.append(&mut f);
+        match res {
+            Ok(mut r) => {
+                findings.append(&mut r.findings);
+                if r.fetch_failed {
+                    failed += 1;
+                }
+            }
+            Err(_) => failed += 1,
         }
+    }
+    if let Some(f) = partial_scan_finding("packagist", failed, total, &file_path) {
+        findings.push(f);
     }
     findings
 }
@@ -875,12 +960,17 @@ async fn check_one_composer_package(
     client: &Client,
     dep: &DepInfo,
     file_path: &str,
-) -> Vec<AuditFinding> {
+) -> CheckResult {
     let mut findings = Vec::new();
     let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
     let response = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(_) => return findings,
+        Err(_) => {
+            return CheckResult {
+                findings,
+                fetch_failed: true,
+            };
+        }
     };
 
     if response.status().as_u16() == 404 {
@@ -899,16 +989,27 @@ async fn check_one_composer_package(
                 dep.name
             )],
         });
-        return findings;
+        return CheckResult {
+            findings,
+            fetch_failed: false,
+        };
     }
 
     if !response.status().is_success() {
-        return findings;
+        return CheckResult {
+            findings,
+            fetch_failed: true,
+        };
     }
 
     let _body: Value = match response.json().await {
         Ok(v) => v,
-        Err(_) => return findings,
+        Err(_) => {
+            return CheckResult {
+                findings,
+                fetch_failed: true,
+            };
+        }
     };
 
     // Download-count check: only for direct deps (same rationale as npm).
@@ -943,7 +1044,10 @@ async fn check_one_composer_package(
         }
     }
 
-    findings
+    CheckResult {
+        findings,
+        fetch_failed: false,
+    }
 }
 
 /// Parse an RFC 3339 / ISO 8601 date string and return the age in hours relative to now.
@@ -1248,6 +1352,50 @@ mod tests {
             observed_peak <= limit,
             "semaphore violation: peak={observed_peak} limit={limit}"
         );
+    }
+
+    #[test]
+    fn partial_scan_no_failures_returns_none() {
+        assert!(partial_scan_finding("npm", 0, 100, "package.json").is_none());
+    }
+
+    #[test]
+    fn partial_scan_zero_total_returns_none() {
+        assert!(partial_scan_finding("npm", 0, 0, "package.json").is_none());
+    }
+
+    #[test]
+    fn partial_scan_low_failure_rate_is_info() {
+        // 10/100 = 10% — under 50% threshold
+        let f = partial_scan_finding("npm", 10, 100, "package.json").unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert_eq!(f.rule_id, "deep-partial-scan");
+    }
+
+    #[test]
+    fn partial_scan_high_failure_rate_is_medium() {
+        // 60/100 = 60% — >=50%, <90%
+        let f = partial_scan_finding("npm", 60, 100, "package.json").unwrap();
+        assert_eq!(f.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn partial_scan_critical_failure_rate_is_high() {
+        // 95/100 = 95% — >=90%, audit is effectively blind
+        let f = partial_scan_finding("packagist", 95, 100, "composer.json").unwrap();
+        assert_eq!(f.severity, Severity::High);
+    }
+
+    #[test]
+    fn partial_scan_boundary_exactly_50_percent() {
+        let f = partial_scan_finding("npm", 5, 10, "package.json").unwrap();
+        assert_eq!(f.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn partial_scan_boundary_exactly_90_percent() {
+        let f = partial_scan_finding("npm", 9, 10, "package.json").unwrap();
+        assert_eq!(f.severity, Severity::High);
     }
 
     #[test]

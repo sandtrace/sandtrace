@@ -682,6 +682,19 @@ async fn check_npm_packages(
 }
 
 async fn check_one_npm_package(client: &Client, dep: &DepInfo, file_path: &str) -> CheckResult {
+    let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
+
+    // Transitive + trusted: skip the registry entirely. Trust here is on volume —
+    // these packages publish constantly with huge weekly downloads; the existence
+    // check, age check, and download check would all be no-ops. The package
+    // tarball still gets scanned for obfuscation/behavior in the non-deep audit.
+    if is_trusted && dep.is_transitive {
+        return CheckResult {
+            findings: Vec::new(),
+            fetch_failed: false,
+        };
+    }
+
     // Cache hit: use stored RFC 3339 dates, recompute age now. No HTTP.
     let meta = if let Some(cached) = registry_cache::read("npm", &dep.name) {
         cached
@@ -693,7 +706,7 @@ async fn check_one_npm_package(client: &Client, dep: &DepInfo, file_path: &str) 
                         file_path: file_path.to_string(),
                         line_number: None,
                         rule_id: "deep-package-not-found".to_string(),
-                        severity: Severity::Critical,
+                        severity: demote_for_dev(Severity::Critical, dep.is_dev),
                         description: format!(
                             "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
                             dep.name
@@ -839,7 +852,7 @@ fn findings_from_npm_meta(
                 file_path: file_path.to_string(),
                 line_number: None,
                 rule_id: "deep-version-too-new".to_string(),
-                severity: Severity::High,
+                severity: demote_for_dev(Severity::High, dep.is_dev),
                 description: format!(
                     "Latest version of '{}' (v{}) was published only {} hours ago ({} days). New versions may contain malicious code from compromised credentials",
                     dep.name,
@@ -863,7 +876,7 @@ fn findings_from_npm_meta(
                 file_path: file_path.to_string(),
                 line_number: None,
                 rule_id: "deep-new-package".to_string(),
-                severity: Severity::Medium,
+                severity: demote_for_dev(Severity::Medium, dep.is_dev),
                 description: format!(
                     "Package '{}' was first published {} days ago. New packages are higher risk — verify this is legitimate",
                     dep.name, age_days
@@ -884,7 +897,7 @@ fn findings_from_npm_meta(
                     file_path: file_path.to_string(),
                     line_number: None,
                     rule_id: "deep-low-downloads".to_string(),
-                    severity: Severity::Medium,
+                    severity: demote_for_dev(Severity::Medium, dep.is_dev),
                     description: format!(
                         "Package '{}' has only {} weekly downloads. Low-download packages may be typosquats or hallucinated names",
                         dep.name, downloads
@@ -900,6 +913,22 @@ fn findings_from_npm_meta(
     }
 
     findings
+}
+
+/// Demote a finding severity one step when the dep is dev-only. Dev deps don't
+/// ship to prod, so their blast radius is smaller — but they still run in CI
+/// and can exfiltrate secrets via postinstall, so we don't drop them entirely.
+fn demote_for_dev(sev: Severity, is_dev: bool) -> Severity {
+    if !is_dev {
+        return sev;
+    }
+    match sev {
+        Severity::Critical => Severity::High,
+        Severity::High => Severity::Medium,
+        Severity::Medium => Severity::Low,
+        Severity::Low => Severity::Info,
+        Severity::Info => Severity::Info,
+    }
 }
 
 fn age_hours_from(dt: DateTime<Utc>) -> u64 {
@@ -961,6 +990,16 @@ async fn check_one_composer_package(
     dep: &DepInfo,
     file_path: &str,
 ) -> CheckResult {
+    let is_trusted = TRUSTED_COMPOSER_PACKAGES.iter().any(|&t| t == dep.name);
+
+    // Transitive + trusted: skip Packagist entirely (same rationale as npm).
+    if is_trusted && dep.is_transitive {
+        return CheckResult {
+            findings: Vec::new(),
+            fetch_failed: false,
+        };
+    }
+
     let mut findings = Vec::new();
     let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
     let response = match client.get(&url).send().await {
@@ -978,7 +1017,7 @@ async fn check_one_composer_package(
             file_path: file_path.to_string(),
             line_number: None,
             rule_id: "deep-package-not-found".to_string(),
-            severity: Severity::Critical,
+            severity: demote_for_dev(Severity::Critical, dep.is_dev),
             description: format!(
                 "Package '{}' does not exist on Packagist. It may be hallucinated by an AI code generator",
                 dep.name
@@ -1027,7 +1066,7 @@ async fn check_one_composer_package(
                             file_path: file_path.to_string(),
                             line_number: None,
                             rule_id: "deep-low-downloads".to_string(),
-                            severity: Severity::Medium,
+                            severity: demote_for_dev(Severity::Medium, dep.is_dev),
                             description: format!(
                                 "Package '{}' has only {} total downloads on Packagist. Low-download packages may be typosquats",
                                 dep.name, downloads
@@ -1396,6 +1435,147 @@ mod tests {
     fn partial_scan_boundary_exactly_90_percent() {
         let f = partial_scan_finding("npm", 9, 10, "package.json").unwrap();
         assert_eq!(f.severity, Severity::High);
+    }
+
+    // ---- Allowlist semantics (A7) ----
+
+    fn meta_with_dates(
+        registry: &str,
+        name: &str,
+        latest_publish: DateTime<Utc>,
+        created: DateTime<Utc>,
+        downloads: Option<u64>,
+    ) -> RegistryMeta {
+        RegistryMeta {
+            registry: registry.to_string(),
+            name: name.to_string(),
+            cached_at: Utc::now(),
+            latest_version: Some("1.0.0".to_string()),
+            latest_publish_date: Some(latest_publish),
+            created_date: Some(created),
+            weekly_downloads: downloads,
+        }
+    }
+
+    fn dep(name: &str, is_transitive: bool, is_dev: bool) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            version_spec: "1.0.0".to_string(),
+            ecosystem: Ecosystem::Npm,
+            is_dev,
+            is_transitive,
+        }
+    }
+
+    /// REGRESSION: direct + trusted skips only the age check (not existence/downloads).
+    /// Behavior preserved from pre-Lane-A code.
+    #[test]
+    fn direct_trusted_skips_age_only() {
+        let recent = Utc::now() - chrono::Duration::hours(24); // 1d old — would trigger age
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "react", recent, old, Some(50_000_000));
+        let findings = findings_from_npm_meta(&meta, &dep("react", false, false), "package.json");
+        // react is trusted → no age finding even though publish is 24h ago
+        assert!(
+            findings.iter().all(|f| f.rule_id != "deep-version-too-new"),
+            "trusted direct dep should skip age check"
+        );
+    }
+
+    /// REGRESSION: direct + untrusted with recent publish gets age finding (threshold preserved).
+    #[test]
+    fn direct_untrusted_recent_publish_flagged() {
+        let recent = Utc::now() - chrono::Duration::hours(24);
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "some-rando-pkg", recent, old, Some(5_000_000));
+        let findings =
+            findings_from_npm_meta(&meta, &dep("some-rando-pkg", false, false), "package.json");
+        assert!(
+            findings.iter().any(|f| f.rule_id == "deep-version-too-new"),
+            "untrusted direct dep with <168h publish should be flagged"
+        );
+    }
+
+    /// REGRESSION: download-count check still fires for direct deps.
+    #[test]
+    fn direct_low_downloads_flagged() {
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "obscure-pkg", old, old, Some(42));
+        let findings =
+            findings_from_npm_meta(&meta, &dep("obscure-pkg", false, false), "package.json");
+        assert!(
+            findings.iter().any(|f| f.rule_id == "deep-low-downloads"),
+            "direct dep with <100 weekly downloads should be flagged"
+        );
+    }
+
+    /// Transitive low-downloads is intentionally NOT flagged (you can't drop a transitive).
+    #[test]
+    fn transitive_low_downloads_not_flagged() {
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "obscure-pkg", old, old, Some(42));
+        let findings =
+            findings_from_npm_meta(&meta, &dep("obscure-pkg", true, false), "package.json");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "deep-low-downloads"),
+            "transitive deps should not trigger low-download finding"
+        );
+    }
+
+    /// Sanity check on the trusted list — make sure react is in it, since the direct
+    /// allowlist test depends on this.
+    #[test]
+    fn trusted_npm_packages_contains_react() {
+        assert!(TRUSTED_NPM_PACKAGES.contains(&"react"));
+    }
+
+    /// Trusted composer packages list contains laravel/framework.
+    #[test]
+    fn trusted_composer_packages_contains_laravel() {
+        assert!(TRUSTED_COMPOSER_PACKAGES.contains(&"laravel/framework"));
+    }
+
+    // ---- Dev-dep severity demotion (A8) ----
+
+    #[test]
+    fn demote_for_dev_is_noop_for_prod_dep() {
+        assert_eq!(
+            demote_for_dev(Severity::Critical, false),
+            Severity::Critical
+        );
+        assert_eq!(demote_for_dev(Severity::High, false), Severity::High);
+        assert_eq!(demote_for_dev(Severity::Medium, false), Severity::Medium);
+    }
+
+    #[test]
+    fn demote_for_dev_drops_one_step() {
+        assert_eq!(demote_for_dev(Severity::Critical, true), Severity::High);
+        assert_eq!(demote_for_dev(Severity::High, true), Severity::Medium);
+        assert_eq!(demote_for_dev(Severity::Medium, true), Severity::Low);
+        assert_eq!(demote_for_dev(Severity::Low, true), Severity::Info);
+        assert_eq!(demote_for_dev(Severity::Info, true), Severity::Info);
+    }
+
+    /// Findings on dev deps come back at demoted severity end-to-end.
+    #[test]
+    fn dev_dep_finding_severity_demoted_end_to_end() {
+        let recent = Utc::now() - chrono::Duration::hours(24);
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "some-rando-pkg", recent, old, Some(5_000_000));
+        let findings_prod =
+            findings_from_npm_meta(&meta, &dep("some-rando-pkg", false, false), "package.json");
+        let findings_dev =
+            findings_from_npm_meta(&meta, &dep("some-rando-pkg", false, true), "package.json");
+        let prod_age = findings_prod
+            .iter()
+            .find(|f| f.rule_id == "deep-version-too-new")
+            .unwrap();
+        let dev_age = findings_dev
+            .iter()
+            .find(|f| f.rule_id == "deep-version-too-new")
+            .unwrap();
+        assert_eq!(prod_age.severity, Severity::High);
+        assert_eq!(dev_age.severity, Severity::Medium);
     }
 
     #[test]

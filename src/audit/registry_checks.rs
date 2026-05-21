@@ -4,6 +4,7 @@
 //! Only runs when `--deep` flag is passed (requires network access).
 
 use crate::event::{AuditFinding, Severity};
+use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -398,61 +399,90 @@ fn check_composer_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec
     findings
 }
 
-/// Parse an ISO 8601 date string and return the age in hours.
+/// Parse an RFC 3339 / ISO 8601 date string and return the age in hours relative to now.
 fn parse_age_hours(date_str: &str) -> Option<u64> {
-    // Simple parser for ISO 8601: "2026-03-21T10:30:00.000Z"
-    let cleaned = date_str.trim().trim_end_matches('Z');
-    let parts: Vec<&str> = cleaned.split('T').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-    if date_parts.len() != 3 {
-        return None;
-    }
-    let time_parts: Vec<u64> = parts[1]
-        .split(':')
-        .filter_map(|p| p.split('.').next()?.parse().ok())
-        .collect();
-    if time_parts.len() < 2 {
-        return None;
-    }
+    parse_age_hours_at(date_str, Utc::now())
+}
 
-    // Rough epoch calculation
-    let year = date_parts[0] as i64;
-    let month = date_parts[1] as i64;
-    let day = date_parts[2] as i64;
-    let hour = time_parts[0] as i64;
-
-    let days_since_epoch = (year - 1970) * 365
-        + (year - 1969) / 4
-        + match month {
-            1 => 0,
-            2 => 31,
-            3 => 59,
-            4 => 90,
-            5 => 120,
-            6 => 151,
-            7 => 181,
-            8 => 212,
-            9 => 243,
-            10 => 273,
-            11 => 304,
-            12 => 334,
-            _ => 0,
-        }
-        + day
-        - 1;
-
-    let pkg_epoch = days_since_epoch * 86400 + hour * 3600;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-
-    let diff = now - pkg_epoch;
-    if diff < 0 {
+fn parse_age_hours_at(date_str: &str, now: DateTime<Utc>) -> Option<u64> {
+    let parsed = DateTime::parse_from_rfc3339(date_str.trim()).ok()?;
+    let diff = now.signed_duration_since(parsed.with_timezone(&Utc));
+    if diff.num_seconds() < 0 {
         return Some(0);
     }
-    Some((diff / 3600) as u64)
+    Some(diff.num_hours() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn now_fixed() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn parse_age_zero_when_published_now() {
+        let age = parse_age_hours_at("2026-05-13T12:00:00Z", now_fixed());
+        assert_eq!(age, Some(0));
+    }
+
+    #[test]
+    fn parse_age_one_day() {
+        let age = parse_age_hours_at("2026-05-12T12:00:00Z", now_fixed());
+        assert_eq!(age, Some(24));
+    }
+
+    #[test]
+    fn parse_age_seven_days_threshold() {
+        // Exactly 7 days = 168 hours — the version-age cooldown threshold.
+        let age = parse_age_hours_at("2026-05-06T12:00:00Z", now_fixed());
+        assert_eq!(age, Some(168));
+    }
+
+    #[test]
+    fn parse_age_future_returns_zero() {
+        let age = parse_age_hours_at("2026-05-14T12:00:00Z", now_fixed());
+        assert_eq!(age, Some(0));
+    }
+
+    #[test]
+    fn parse_age_handles_subsecond_precision() {
+        // Subsecond precision is parsed correctly; truncation to whole hours rounds down.
+        // 2026-05-12T11:59:59.500Z is just under 24h before now → 24h floor.
+        let age = parse_age_hours_at("2026-05-12T11:59:59.500Z", now_fixed());
+        assert_eq!(age, Some(24));
+    }
+
+    #[test]
+    fn parse_age_handles_timezone_offset() {
+        // 2026-05-12T08:00:00-04:00 == 2026-05-12T12:00:00Z
+        let age = parse_age_hours_at("2026-05-12T08:00:00-04:00", now_fixed());
+        assert_eq!(age, Some(24));
+    }
+
+    #[test]
+    fn parse_age_rejects_malformed() {
+        assert_eq!(parse_age_hours_at("not a date", now_fixed()), None);
+        assert_eq!(parse_age_hours_at("", now_fixed()), None);
+        assert_eq!(parse_age_hours_at("2026-05-13", now_fixed()), None);
+    }
+
+    /// REGRESSION: month boundary correctness — the old custom parser used a hand-rolled
+    /// month-offset lookup with year-1969/4 leap math that mishandled centuries.
+    /// chrono::DateTime handles these correctly.
+    #[test]
+    fn parse_age_leap_year_feb_29() {
+        let now = Utc.with_ymd_and_hms(2028, 3, 1, 0, 0, 0).unwrap();
+        let age = parse_age_hours_at("2028-02-29T00:00:00Z", now);
+        assert_eq!(age, Some(24));
+    }
+
+    #[test]
+    fn parse_age_year_boundary() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let age = parse_age_hours_at("2025-12-31T00:00:00Z", now);
+        assert_eq!(age, Some(24));
+    }
 }

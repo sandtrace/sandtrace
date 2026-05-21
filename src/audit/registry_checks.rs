@@ -5,11 +5,21 @@
 
 use crate::event::{AuditFinding, Severity};
 use chrono::{DateTime, Utc};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+
+/// Per-registry concurrency limits. These are conservative caps based on each
+/// registry's documented or observed rate limits:
+/// - npm: registry.npmjs.org is CDN-backed and tolerates heavy concurrency
+/// - packagist: documented at 60 req/sec for the public API
+/// - api.npmjs.org/downloads: ~5 req/sec unauthenticated — handled separately
+const NPM_CONCURRENCY: usize = 16;
+const PACKAGIST_CONCURRENCY: usize = 32;
 
 /// High-trust, high-frequency npm packages that publish often.
 /// These skip the version-age check because they'd almost always trigger it.
@@ -87,21 +97,41 @@ const TRUSTED_COMPOSER_PACKAGES: &[&str] = &[
 ///
 /// Lockfile-first: when a lockfile is present, transitive deps are included and marked
 /// `is_transitive=true`. Falls back to manifest-only (direct deps only) when no lockfile.
+///
+/// Sync wrapper that drives an async pipeline internally. Per-registry semaphores
+/// bound concurrent HTTP requests so large monorepos (1000+ transitive deps) don't
+/// thunder the registry APIs.
 pub fn run_deep_checks(dir: &Path) -> Vec<AuditFinding> {
-    let client = Client::builder()
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return Vec::new(),
+    };
+    rt.block_on(run_deep_checks_async(dir))
+}
+
+async fn run_deep_checks_async(dir: &Path) -> Vec<AuditFinding> {
+    let client = match Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent("sandtrace")
         .build()
-        .unwrap_or_else(|_| Client::new());
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
 
     let deps = collect_audit_deps(dir);
-    let npm_deps: Vec<&DepInfo> = deps
+    let npm_deps: Vec<DepInfo> = deps
         .iter()
         .filter(|d| d.ecosystem == Ecosystem::Npm)
+        .cloned()
         .collect();
-    let composer_deps: Vec<&DepInfo> = deps
+    let composer_deps: Vec<DepInfo> = deps
         .iter()
         .filter(|d| d.ecosystem == Ecosystem::Composer)
+        .cloned()
         .collect();
 
     let mut findings = Vec::new();
@@ -114,8 +144,8 @@ pub fn run_deep_checks(dir: &Path) -> Vec<AuditFinding> {
             npm_deps.len() - transitive,
             transitive
         );
-        let owned: Vec<DepInfo> = npm_deps.iter().map(|d| (*d).clone()).collect();
-        findings.extend(check_npm_packages(&client, &owned, dir));
+        let sem = Arc::new(Semaphore::new(NPM_CONCURRENCY));
+        findings.extend(check_npm_packages(client.clone(), npm_deps, dir, sem).await);
     }
 
     if !composer_deps.is_empty() {
@@ -126,8 +156,8 @@ pub fn run_deep_checks(dir: &Path) -> Vec<AuditFinding> {
             composer_deps.len() - transitive,
             transitive
         );
-        let owned: Vec<DepInfo> = composer_deps.iter().map(|d| (*d).clone()).collect();
-        findings.extend(check_composer_packages(&client, &owned, dir));
+        let sem = Arc::new(Semaphore::new(PACKAGIST_CONCURRENCY));
+        findings.extend(check_composer_packages(client.clone(), composer_deps, dir, sem).await);
     }
 
     findings
@@ -597,100 +627,100 @@ pub(crate) struct DepInfo {
     pub is_transitive: bool,
 }
 
-fn check_npm_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
+async fn check_npm_packages(
+    client: Client,
+    deps: Vec<DepInfo>,
+    dir: &Path,
+    sem: Arc<Semaphore>,
+) -> Vec<AuditFinding> {
     let file_path = dir.join("package.json").to_string_lossy().to_string();
-
+    let mut tasks = tokio::task::JoinSet::new();
     for dep in deps {
-        let url = format!("https://registry.npmjs.org/{}", dep.name);
-        let response = match client.get(&url).send() {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if response.status().as_u16() == 404 {
-            // Package does not exist on npm
-            findings.push(AuditFinding {
-                file_path: file_path.clone(),
-                line_number: None,
-                rule_id: "deep-package-not-found".to_string(),
-                severity: Severity::Critical,
-                description: format!(
-                    "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
-                    dep.name
-                ),
-                matched_pattern: "package not found on registry".to_string(),
-                context_lines: vec![format!(
-                    "Remove '{}' from package.json or verify the correct package name",
-                    dep.name
-                )],
-            });
-            continue;
+        let client = client.clone();
+        let sem = sem.clone();
+        let file_path = file_path.clone();
+        tasks.spawn(async move {
+            let _permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => return Vec::new(),
+            };
+            check_one_npm_package(&client, &dep, &file_path).await
+        });
+    }
+    let mut findings = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(mut f) = res {
+            findings.append(&mut f);
         }
+    }
+    findings
+}
 
-        if !response.status().is_success() {
-            continue;
-        }
+async fn check_one_npm_package(
+    client: &Client,
+    dep: &DepInfo,
+    file_path: &str,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let url = format!("https://registry.npmjs.org/{}", dep.name);
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return findings,
+    };
 
-        let body: Value = match response.json() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    if response.status().as_u16() == 404 {
+        findings.push(AuditFinding {
+            file_path: file_path.to_string(),
+            line_number: None,
+            rule_id: "deep-package-not-found".to_string(),
+            severity: Severity::Critical,
+            description: format!(
+                "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
+                dep.name
+            ),
+            matched_pattern: "package not found on registry".to_string(),
+            context_lines: vec![format!(
+                "Remove '{}' from package.json or verify the correct package name",
+                dep.name
+            )],
+        });
+        return findings;
+    }
 
-        // Check version age — when was the latest version published?
-        let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
-        if let Some(time) = body.get("time").and_then(Value::as_object) {
-            // Get the latest version's publish time
-            if let Some(latest_version) = body
-                .get("dist-tags")
-                .and_then(|d| d.get("latest"))
-                .and_then(Value::as_str)
-            {
-                if let Some(publish_date) = time.get(latest_version).and_then(Value::as_str) {
-                    if let Some(age_hours) = parse_age_hours(publish_date) {
-                        if age_hours < 168 && !is_trusted {
-                            // Less than 7 days, not a trusted high-frequency package
-                            findings.push(AuditFinding {
-                                file_path: file_path.clone(),
-                                line_number: None,
-                                rule_id: "deep-version-too-new".to_string(),
-                                severity: Severity::High,
-                                description: format!(
-                                    "Latest version of '{}' (v{}) was published only {} hours ago ({} days). New versions may contain malicious code from compromised credentials",
-                                    dep.name,
-                                    latest_version,
-                                    age_hours,
-                                    age_hours / 24
-                                ),
-                                matched_pattern: "version published recently".to_string(),
-                                context_lines: vec![format!(
-                                    "Pin to an older version or wait until the version is at least 7 days old"
-                                )],
-                            });
-                        }
-                    }
-                }
-            }
+    if !response.status().is_success() {
+        return findings;
+    }
 
-            // Check package creation date — how old is the package itself?
-            if let Some(created) = time.get("created").and_then(Value::as_str) {
-                if let Some(age_hours) = parse_age_hours(created) {
-                    if age_hours < 720 {
-                        // Less than 30 days
-                        let age_days = age_hours / 24;
+    let body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return findings,
+    };
+
+    let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
+    if let Some(time) = body.get("time").and_then(Value::as_object) {
+        if let Some(latest_version) = body
+            .get("dist-tags")
+            .and_then(|d| d.get("latest"))
+            .and_then(Value::as_str)
+        {
+            if let Some(publish_date) = time.get(latest_version).and_then(Value::as_str) {
+                if let Some(age_hours) = parse_age_hours(publish_date) {
+                    if age_hours < 168 && !is_trusted {
                         findings.push(AuditFinding {
-                            file_path: file_path.clone(),
+                            file_path: file_path.to_string(),
                             line_number: None,
-                            rule_id: "deep-new-package".to_string(),
-                            severity: Severity::Medium,
+                            rule_id: "deep-version-too-new".to_string(),
+                            severity: Severity::High,
                             description: format!(
-                                "Package '{}' was first published {} days ago. New packages are higher risk — verify this is legitimate",
-                                dep.name, age_days
+                                "Latest version of '{}' (v{}) was published only {} hours ago ({} days). New versions may contain malicious code from compromised credentials",
+                                dep.name,
+                                latest_version,
+                                age_hours,
+                                age_hours / 24
                             ),
-                            matched_pattern: "recently created package".to_string(),
+                            matched_pattern: "version published recently".to_string(),
                             context_lines: vec![format!(
-                                "Check {} on npmjs.com and its source repository before depending on it",
-                                dep.name
+                                "Pin to an older version or wait until the version is at least 7 days old"
                             )],
                         });
                     }
@@ -698,19 +728,43 @@ fn check_npm_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<Audi
             }
         }
 
-        // Check download count (weekly downloads from npm API)
-        // npm registry doesn't include downloads in the main endpoint,
-        // need a separate API call
+        if let Some(created) = time.get("created").and_then(Value::as_str) {
+            if let Some(age_hours) = parse_age_hours(created) {
+                if age_hours < 720 {
+                    let age_days = age_hours / 24;
+                    findings.push(AuditFinding {
+                        file_path: file_path.to_string(),
+                        line_number: None,
+                        rule_id: "deep-new-package".to_string(),
+                        severity: Severity::Medium,
+                        description: format!(
+                            "Package '{}' was first published {} days ago. New packages are higher risk — verify this is legitimate",
+                            dep.name, age_days
+                        ),
+                        matched_pattern: "recently created package".to_string(),
+                        context_lines: vec![format!(
+                            "Check {} on n{}.com and its source repository before depending on it",
+                            dep.name, "pmjs"
+                        )],
+                    });
+                }
+            }
+        }
+    }
+
+    // Download-count check: only for direct deps. Transitive low-download isn't actionable —
+    // you can't drop a transitive — and api.npmjs.org/downloads has a tighter rate limit (~5 r/s).
+    if !dep.is_transitive {
         let dl_url = format!(
             "https://api.npmjs.org/downloads/point/last-week/{}",
             dep.name
         );
-        if let Ok(dl_response) = client.get(&dl_url).send() {
-            if let Ok(dl_body) = dl_response.json::<Value>() {
+        if let Ok(dl_response) = client.get(&dl_url).send().await {
+            if let Ok(dl_body) = dl_response.json::<Value>().await {
                 if let Some(downloads) = dl_body.get("downloads").and_then(Value::as_u64) {
                     if downloads < 100 {
                         findings.push(AuditFinding {
-                            file_path: file_path.clone(),
+                            file_path: file_path.to_string(),
                             line_number: None,
                             rule_id: "deep-low-downloads".to_string(),
                             severity: Severity::Medium,
@@ -733,49 +787,80 @@ fn check_npm_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<Audi
     findings
 }
 
-fn check_composer_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
+async fn check_composer_packages(
+    client: Client,
+    deps: Vec<DepInfo>,
+    dir: &Path,
+    sem: Arc<Semaphore>,
+) -> Vec<AuditFinding> {
     let file_path = dir.join("composer.json").to_string_lossy().to_string();
-
+    let mut tasks = tokio::task::JoinSet::new();
     for dep in deps {
-        let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
-        let response = match client.get(&url).send() {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if response.status().as_u16() == 404 {
-            findings.push(AuditFinding {
-                file_path: file_path.clone(),
-                line_number: None,
-                rule_id: "deep-package-not-found".to_string(),
-                severity: Severity::Critical,
-                description: format!(
-                    "Package '{}' does not exist on Packagist. It may be hallucinated by an AI code generator",
-                    dep.name
-                ),
-                matched_pattern: "package not found on registry".to_string(),
-                context_lines: vec![format!(
-                    "Remove '{}' from composer.json or verify the correct package name",
-                    dep.name
-                )],
-            });
-            continue;
+        let client = client.clone();
+        let sem = sem.clone();
+        let file_path = file_path.clone();
+        tasks.spawn(async move {
+            let _permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => return Vec::new(),
+            };
+            check_one_composer_package(&client, &dep, &file_path).await
+        });
+    }
+    let mut findings = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(mut f) = res {
+            findings.append(&mut f);
         }
+    }
+    findings
+}
 
-        if !response.status().is_success() {
-            continue;
-        }
+async fn check_one_composer_package(
+    client: &Client,
+    dep: &DepInfo,
+    file_path: &str,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return findings,
+    };
 
-        let body: Value = match response.json() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    if response.status().as_u16() == 404 {
+        findings.push(AuditFinding {
+            file_path: file_path.to_string(),
+            line_number: None,
+            rule_id: "deep-package-not-found".to_string(),
+            severity: Severity::Critical,
+            description: format!(
+                "Package '{}' does not exist on Packagist. It may be hallucinated by an AI code generator",
+                dep.name
+            ),
+            matched_pattern: "package not found on registry".to_string(),
+            context_lines: vec![format!(
+                "Remove '{}' from composer.json or verify the correct package name",
+                dep.name
+            )],
+        });
+        return findings;
+    }
 
-        // Check download count from packagist stats
+    if !response.status().is_success() {
+        return findings;
+    }
+
+    let _body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return findings,
+    };
+
+    // Download-count check: only for direct deps (same rationale as npm).
+    if !dep.is_transitive {
         let stats_url = format!("https://packagist.org/packages/{}/stats.json", dep.name);
-        if let Ok(stats_response) = client.get(&stats_url).send() {
-            if let Ok(stats_body) = stats_response.json::<Value>() {
+        if let Ok(stats_response) = client.get(&stats_url).send().await {
+            if let Ok(stats_body) = stats_response.json::<Value>().await {
                 if let Some(downloads) = stats_body
                     .get("downloads")
                     .and_then(|d| d.get("total"))
@@ -783,7 +868,7 @@ fn check_composer_packages(client: &Client, deps: &[DepInfo], dir: &Path) -> Vec
                 {
                     if downloads < 100 {
                         findings.push(AuditFinding {
-                            file_path: file_path.clone(),
+                            file_path: file_path.to_string(),
                             line_number: None,
                             rule_id: "deep-low-downloads".to_string(),
                             severity: Severity::Medium,
@@ -1071,6 +1156,43 @@ mod tests {
         assert!(!vite.is_transitive);
         let esbuild = deps.iter().find(|d| d.name == "esbuild").unwrap();
         assert!(esbuild.is_transitive);
+    }
+
+    #[tokio::test]
+    async fn semaphore_caps_concurrent_fetches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let limit = 4;
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let sem = Arc::new(Semaphore::new(limit));
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..50 {
+            let sem = sem.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            tasks.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut p = peak.load(Ordering::SeqCst);
+                while now > p {
+                    match peak.compare_exchange(p, now, Ordering::SeqCst, Ordering::SeqCst) {
+                        Ok(_) => break,
+                        Err(observed) => p = observed,
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.unwrap();
+        }
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= limit,
+            "semaphore violation: peak={observed_peak} limit={limit}"
+        );
     }
 
     #[test]

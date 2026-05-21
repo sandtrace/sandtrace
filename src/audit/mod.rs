@@ -1,6 +1,7 @@
 pub mod obfuscation;
 pub mod registry_cache;
 pub mod registry_checks;
+pub mod registry_config_audit;
 pub mod scanner;
 
 use crate::cli::AuditArgs;
@@ -118,6 +119,10 @@ pub fn run_audit_with_config(
     let mut git_template_findings =
         obfuscation::ai_toolchain::check_global_git_template_poisoning(&args.target);
     findings.append(&mut git_template_findings);
+
+    // Registry config audit (.npmrc, bunfig.toml, .yarnrc.yml, uv.toml, pnpm version)
+    let mut config_findings = registry_config_audit::check_registry_configs(&args.target);
+    findings.append(&mut config_findings);
 
     // Deep registry checks (--deep flag: verify packages exist, check version age, downloads)
     if args.deep {

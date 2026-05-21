@@ -90,9 +90,13 @@ uuid = { version = "1", features = ["v4"] }
 ulid = "1.2"
 tempfile = "3.14"
 
+# Audit: TTY-gated progress reporting during deep checks
+indicatif = "0.17"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+wiremock = "0.6"
 
 [[bin]]
 name = "sandtrace"

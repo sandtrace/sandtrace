@@ -6,13 +6,31 @@
 use crate::audit::registry_cache::{self, RegistryMeta};
 use crate::event::{AuditFinding, Severity};
 use chrono::{DateTime, Utc};
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+
+/// Build a progress bar gated on stderr being a TTY. Returns a hidden bar
+/// when not a terminal (CI logs, redirected output) so `.inc()` is a no-op.
+fn deep_check_progress(label: &str, total: u64) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(total);
+    let style =
+        ProgressStyle::with_template("  {prefix:>9.cyan} [{bar:30.green/dim}] {pos}/{len} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=>-");
+    pb.set_style(style);
+    pb.set_prefix(label.to_string());
+    pb
+}
 
 /// Per-registry concurrency limits. These are conservative caps based on each
 /// registry's documented or observed rate limits:
@@ -21,6 +39,28 @@ use tokio::sync::Semaphore;
 /// - api.npmjs.org/downloads: ~5 req/sec unauthenticated — handled separately
 const NPM_CONCURRENCY: usize = 16;
 const PACKAGIST_CONCURRENCY: usize = 32;
+
+/// Registry base URL accessors. Tests override these via env vars to point
+/// at a wiremock instance instead of the public registry.
+fn npm_registry_base() -> String {
+    std::env::var("SANDTRACE_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string())
+}
+
+fn npm_downloads_base() -> String {
+    std::env::var("SANDTRACE_NPM_DOWNLOADS")
+        .unwrap_or_else(|_| "https://api.npmjs.org/downloads/point/last-week".to_string())
+}
+
+fn packagist_base() -> String {
+    std::env::var("SANDTRACE_PACKAGIST")
+        .unwrap_or_else(|_| "https://repo.packagist.org".to_string())
+}
+
+fn packagist_stats_base() -> String {
+    std::env::var("SANDTRACE_PACKAGIST_STATS")
+        .unwrap_or_else(|_| "https://packagist.org".to_string())
+}
 
 /// High-trust, high-frequency npm packages that publish often.
 /// These skip the version-age check because they'd almost always trigger it.
@@ -645,6 +685,7 @@ async fn check_npm_packages(
     let file_path = dir.join("package.json").to_string_lossy().to_string();
     let mut tasks = tokio::task::JoinSet::new();
     let total = deps.len();
+    let progress = deep_check_progress("npm", total as u64);
     for dep in deps {
         let client = client.clone();
         let sem = sem.clone();
@@ -674,7 +715,9 @@ async fn check_npm_packages(
             }
             Err(_) => failed += 1,
         }
+        progress.inc(1);
     }
+    progress.finish_and_clear();
     if let Some(f) = partial_scan_finding("npm", failed, total, &file_path) {
         findings.push(f);
     }
@@ -784,7 +827,7 @@ enum FetchOutcome {
 }
 
 async fn fetch_npm_meta(client: &Client, name: &str) -> FetchOutcome {
-    let url = format!("https://registry.npmjs.org/{}", name);
+    let url = format!("{}/{}", npm_registry_base(), name);
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(_) => return FetchOutcome::Error,
@@ -828,7 +871,7 @@ async fn fetch_npm_meta(client: &Client, name: &str) -> FetchOutcome {
         }
     }
     // Weekly downloads — only fetched here on cache miss; only used for direct deps later.
-    let dl_url = format!("https://api.npmjs.org/downloads/point/last-week/{}", name);
+    let dl_url = format!("{}/{}", npm_downloads_base(), name);
     if let Ok(dl_response) = client.get(&dl_url).send().await {
         if let Ok(dl_body) = dl_response.json::<Value>().await {
             meta.weekly_downloads = dl_body.get("downloads").and_then(Value::as_u64);
@@ -949,6 +992,7 @@ async fn check_composer_packages(
     let file_path = dir.join("composer.json").to_string_lossy().to_string();
     let mut tasks = tokio::task::JoinSet::new();
     let total = deps.len();
+    let progress = deep_check_progress("packagist", total as u64);
     for dep in deps {
         let client = client.clone();
         let sem = sem.clone();
@@ -978,7 +1022,9 @@ async fn check_composer_packages(
             }
             Err(_) => failed += 1,
         }
+        progress.inc(1);
     }
+    progress.finish_and_clear();
     if let Some(f) = partial_scan_finding("packagist", failed, total, &file_path) {
         findings.push(f);
     }
@@ -1001,7 +1047,7 @@ async fn check_one_composer_package(
     }
 
     let mut findings = Vec::new();
-    let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
+    let url = format!("{}/p2/{}.json", packagist_base(), dep.name);
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(_) => {
@@ -1053,7 +1099,11 @@ async fn check_one_composer_package(
 
     // Download-count check: only for direct deps (same rationale as npm).
     if !dep.is_transitive {
-        let stats_url = format!("https://packagist.org/packages/{}/stats.json", dep.name);
+        let stats_url = format!(
+            "{}/packages/{}/stats.json",
+            packagist_stats_base(),
+            dep.name
+        );
         if let Ok(stats_response) = client.get(&stats_url).send().await {
             if let Ok(stats_body) = stats_response.json::<Value>().await {
                 if let Some(downloads) = stats_body
@@ -1556,6 +1606,20 @@ mod tests {
         assert_eq!(demote_for_dev(Severity::Info, true), Severity::Info);
     }
 
+    // ---- Progress bar (A9) ----
+
+    #[test]
+    fn progress_bar_hidden_in_non_tty_env() {
+        // Tests run with stderr redirected (cargo captures it). The progress
+        // bar must be hidden so it does not pollute test output and `.inc()`
+        // remains a no-op.
+        let pb = deep_check_progress("npm", 100);
+        assert!(pb.is_hidden(), "progress bar should be hidden in tests");
+        // No-op inc() must not panic.
+        pb.inc(1);
+        pb.finish_and_clear();
+    }
+
     /// Findings on dev deps come back at demoted severity end-to-end.
     #[test]
     fn dev_dep_finding_severity_demoted_end_to_end() {
@@ -1604,5 +1668,227 @@ mod tests {
         assert!(deps
             .iter()
             .any(|d| d.name == "left-pad" && !d.is_transitive));
+    }
+
+    // ---- End-to-end async pipeline tests via wiremock (A11) ----
+
+    /// Coarse mutex to serialize wiremock tests because they mutate process-wide
+    /// env vars (registry URL overrides, cache dir).
+    static ASYNC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    use serde_json::json;
+    use std::sync::Mutex;
+    use wiremock::matchers::{method, path as wm_path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn write_project_file(dir: &std::path::Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn e2e_recent_publish_flagged_via_wiremock() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let server = MockServer::start().await;
+        let cache_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        write_project_file(
+            project_dir.path(),
+            "package.json",
+            r#"{"dependencies":{"lodash":"^4.0.0"}}"#,
+        );
+        write_project_file(
+            project_dir.path(),
+            "package-lock.json",
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name":"x"},
+                    "node_modules/lodash": {"version":"4.17.21"},
+                    "node_modules/left-pad": {"version":"1.3.0"}
+                }
+            }"#,
+        );
+
+        let now = Utc::now();
+        let recent = now - chrono::Duration::hours(48);
+        let old = now - chrono::Duration::days(365);
+
+        // lodash is in TRUSTED_NPM_PACKAGES → age check should be skipped
+        Mock::given(method("GET"))
+            .and(wm_path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dist-tags": {"latest": "4.17.21"},
+                "time": {"created": old.to_rfc3339(), "4.17.21": recent.to_rfc3339()}
+            })))
+            .mount(&server)
+            .await;
+        // left-pad: not trusted, transitive, 48h old → version-too-new finding
+        Mock::given(method("GET"))
+            .and(wm_path("/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dist-tags": {"latest": "1.3.0"},
+                "time": {"created": old.to_rfc3339(), "1.3.0": recent.to_rfc3339()}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/downloads/.*"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"downloads": 50_000_000})),
+            )
+            .mount(&server)
+            .await;
+
+        // SAFETY: ASYNC_TEST_LOCK serializes; only this test mutates env.
+        unsafe {
+            std::env::set_var("SANDTRACE_NPM_REGISTRY", server.uri());
+            std::env::set_var(
+                "SANDTRACE_NPM_DOWNLOADS",
+                format!("{}/downloads", server.uri()),
+            );
+            std::env::set_var("SANDTRACE_CACHE_DIR", cache_dir.path());
+        }
+        let findings = tokio::task::spawn_blocking({
+            let p = project_dir.path().to_path_buf();
+            move || run_deep_checks(&p)
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var("SANDTRACE_NPM_REGISTRY");
+            std::env::remove_var("SANDTRACE_NPM_DOWNLOADS");
+            std::env::remove_var("SANDTRACE_CACHE_DIR");
+        }
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "deep-version-too-new" && f.description.contains("lodash")),
+            "trusted lodash should not be flagged"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "deep-version-too-new" && f.description.contains("left-pad")),
+            "untrusted transitive should be flagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_partial_scan_info_at_low_failure_rate() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let server = MockServer::start().await;
+        let cache_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        write_project_file(
+            project_dir.path(),
+            "package.json",
+            r#"{"dependencies":{"some-rando-a":"^1","some-rando-b":"^1","some-rando-c":"^1"}}"#,
+        );
+        write_project_file(
+            project_dir.path(),
+            "package-lock.json",
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name":"x"},
+                    "node_modules/some-rando-a": {"version":"1.0.0"},
+                    "node_modules/some-rando-b": {"version":"1.0.0"},
+                    "node_modules/some-rando-c": {"version":"1.0.0"}
+                }
+            }"#,
+        );
+        let old = Utc::now() - chrono::Duration::days(365);
+        let ok_body = json!({
+            "dist-tags": {"latest": "1.0.0"},
+            "time": {"created": old.to_rfc3339(), "1.0.0": old.to_rfc3339()}
+        });
+        Mock::given(method("GET"))
+            .and(wm_path("/some-rando-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wm_path("/some-rando-b"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body))
+            .mount(&server)
+            .await;
+        // 1/3 = 33% failure → Info severity
+        Mock::given(method("GET"))
+            .and(wm_path("/some-rando-c"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/downloads/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"downloads": 1_000_000})))
+            .mount(&server)
+            .await;
+
+        unsafe {
+            std::env::set_var("SANDTRACE_NPM_REGISTRY", server.uri());
+            std::env::set_var(
+                "SANDTRACE_NPM_DOWNLOADS",
+                format!("{}/downloads", server.uri()),
+            );
+            std::env::set_var("SANDTRACE_CACHE_DIR", cache_dir.path());
+        }
+        let findings = tokio::task::spawn_blocking({
+            let p = project_dir.path().to_path_buf();
+            move || run_deep_checks(&p)
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var("SANDTRACE_NPM_REGISTRY");
+            std::env::remove_var("SANDTRACE_NPM_DOWNLOADS");
+            std::env::remove_var("SANDTRACE_CACHE_DIR");
+        }
+
+        let partial = findings
+            .iter()
+            .find(|f| f.rule_id == "deep-partial-scan")
+            .expect("partial-scan finding expected");
+        assert_eq!(partial.severity, Severity::Info);
+    }
+
+    #[tokio::test]
+    async fn e2e_package_not_found_critical_via_404() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let server = MockServer::start().await;
+        let cache_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        write_project_file(
+            project_dir.path(),
+            "package.json",
+            r#"{"dependencies":{"hallucinated-pkg-name":"^1"}}"#,
+        );
+        Mock::given(method("GET"))
+            .and(wm_path("/hallucinated-pkg-name"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        unsafe {
+            std::env::set_var("SANDTRACE_NPM_REGISTRY", server.uri());
+            std::env::set_var("SANDTRACE_CACHE_DIR", cache_dir.path());
+        }
+        let findings = tokio::task::spawn_blocking({
+            let p = project_dir.path().to_path_buf();
+            move || run_deep_checks(&p)
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var("SANDTRACE_NPM_REGISTRY");
+            std::env::remove_var("SANDTRACE_CACHE_DIR");
+        }
+
+        let nf = findings
+            .iter()
+            .find(|f| f.rule_id == "deep-package-not-found")
+            .expect("404 should produce deep-package-not-found");
+        assert_eq!(nf.severity, Severity::Critical);
+        assert!(nf.description.contains("hallucinated-pkg-name"));
     }
 }

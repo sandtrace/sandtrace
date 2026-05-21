@@ -210,15 +210,15 @@ fn build_sbom(target: &Path) -> Result<BuiltSbom> {
 }
 
 #[derive(Default)]
-struct ManifestGroup {
-    package_json: Option<PathBuf>,
-    npm_shrinkwrap_json: Option<PathBuf>,
-    package_lock_json: Option<PathBuf>,
-    package_lock_yaml: Option<PathBuf>,
-    pnpm_lock_yaml: Option<PathBuf>,
-    yarn_lock: Option<PathBuf>,
-    composer_json: Option<PathBuf>,
-    composer_lock: Option<PathBuf>,
+pub(crate) struct ManifestGroup {
+    pub(crate) package_json: Option<PathBuf>,
+    pub(crate) npm_shrinkwrap_json: Option<PathBuf>,
+    pub(crate) package_lock_json: Option<PathBuf>,
+    pub(crate) package_lock_yaml: Option<PathBuf>,
+    pub(crate) pnpm_lock_yaml: Option<PathBuf>,
+    pub(crate) yarn_lock: Option<PathBuf>,
+    pub(crate) composer_json: Option<PathBuf>,
+    pub(crate) composer_lock: Option<PathBuf>,
     gemfile: Option<PathBuf>,
     gemfile_lock: Option<PathBuf>,
     gemspecs: Vec<PathBuf>,
@@ -253,7 +253,7 @@ struct ManifestGroup {
     deno_lock: Option<PathBuf>,
 }
 
-fn discover_manifests(target: &Path) -> Result<BTreeMap<PathBuf, ManifestGroup>> {
+pub(crate) fn discover_manifests(target: &Path) -> Result<BTreeMap<PathBuf, ManifestGroup>> {
     let mut builder = WalkBuilder::new(target);
     builder
         .hidden(false)

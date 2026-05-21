@@ -125,13 +125,13 @@ const CREDENTIAL_PATTERNS: &[ContentPattern] = &[
         rule_id: "cred-generic-password",
         description: "Hardcoded password assignment",
         severity: Severity::High,
-        pattern: r#"(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']{8,}["']"#,
+        pattern: r#"(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
     },
     ContentPattern {
         rule_id: "cred-generic-secret",
         description: "Hardcoded secret/token assignment",
         severity: Severity::High,
-        pattern: r#"(?i)(secret|token|api_key|apikey|auth_token)\s*[:=]\s*["'][^"']{8,}["']"#,
+        pattern: r#"(?i)(secret|token|api_key|apikey|auth_token)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
     },
     ContentPattern {
         rule_id: "cred-github-token",
@@ -813,6 +813,43 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
             "console.warn secret references should be skipped as false positives"
+        );
+    }
+
+    #[test]
+    fn test_skip_token_key_prefix_string_literal() {
+        // Regression: a string literal ending in "token:" (e.g. a Redis key
+        // prefix) must not let the value class [^"'] greedily span newlines to
+        // the next quote on a later line. Real secrets live on one line.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("MagicTokenService.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "$storedToken = LoggingRedis::get($rawKey);").unwrap();
+        writeln!(file, "if ($storedToken === $token) {{").unwrap();
+        writeln!(file, "    $userId = Str::after($rawKey, 'magic_token:');").unwrap();
+        writeln!(file, "    $user = User::find($userId);").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "'magic_token:' key-prefix literal must not cross-line match as a hardcoded secret"
+        );
+    }
+
+    #[test]
+    fn test_detect_single_line_hardcoded_secret() {
+        // Guard: the newline anchor must not break detection of a genuine
+        // single-line hardcoded secret assignment.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("config.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "$apiToken = 'sk_abcd1234efgh5678ijkl';").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "a genuine single-line hardcoded token assignment must still be detected"
         );
     }
 

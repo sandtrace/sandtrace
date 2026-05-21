@@ -3,6 +3,7 @@
 //!
 //! Only runs when `--deep` flag is passed (requires network access).
 
+use crate::audit::registry_cache::{self, RegistryMeta};
 use crate::event::{AuditFinding, Severity};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -661,130 +662,184 @@ async fn check_one_npm_package(
     dep: &DepInfo,
     file_path: &str,
 ) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    let url = format!("https://registry.npmjs.org/{}", dep.name);
+    // Cache hit: use stored RFC 3339 dates, recompute age now. No HTTP.
+    let meta = if let Some(cached) = registry_cache::read("npm", &dep.name) {
+        cached
+    } else {
+        match fetch_npm_meta(client, &dep.name).await {
+            FetchOutcome::Missing => {
+                return vec![AuditFinding {
+                    file_path: file_path.to_string(),
+                    line_number: None,
+                    rule_id: "deep-package-not-found".to_string(),
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
+                        dep.name
+                    ),
+                    matched_pattern: "package not found on registry".to_string(),
+                    context_lines: vec![format!(
+                        "Remove '{}' from package.json or verify the correct package name",
+                        dep.name
+                    )],
+                }];
+            }
+            FetchOutcome::Error => return Vec::new(),
+            FetchOutcome::Ok(m) => {
+                registry_cache::write(&m);
+                m
+            }
+        }
+    };
+
+    findings_from_npm_meta(&meta, dep, file_path)
+}
+
+enum FetchOutcome {
+    Ok(RegistryMeta),
+    Missing,
+    Error,
+}
+
+async fn fetch_npm_meta(client: &Client, name: &str) -> FetchOutcome {
+    let url = format!("https://registry.npmjs.org/{}", name);
     let response = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(_) => return findings,
+        Err(_) => return FetchOutcome::Error,
     };
-
     if response.status().as_u16() == 404 {
-        findings.push(AuditFinding {
-            file_path: file_path.to_string(),
-            line_number: None,
-            rule_id: "deep-package-not-found".to_string(),
-            severity: Severity::Critical,
-            description: format!(
-                "Package '{}' does not exist on the npm registry. It may be hallucinated by an AI code generator or a typosquat attempt",
-                dep.name
-            ),
-            matched_pattern: "package not found on registry".to_string(),
-            context_lines: vec![format!(
-                "Remove '{}' from package.json or verify the correct package name",
-                dep.name
-            )],
-        });
-        return findings;
+        return FetchOutcome::Missing;
     }
-
     if !response.status().is_success() {
-        return findings;
+        return FetchOutcome::Error;
     }
-
     let body: Value = match response.json().await {
         Ok(v) => v,
-        Err(_) => return findings,
+        Err(_) => return FetchOutcome::Error,
     };
-
-    let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
+    let mut meta = RegistryMeta {
+        registry: "npm".to_string(),
+        name: name.to_string(),
+        cached_at: Utc::now(),
+        latest_version: None,
+        latest_publish_date: None,
+        created_date: None,
+        weekly_downloads: None,
+    };
     if let Some(time) = body.get("time").and_then(Value::as_object) {
         if let Some(latest_version) = body
             .get("dist-tags")
             .and_then(|d| d.get("latest"))
             .and_then(Value::as_str)
         {
-            if let Some(publish_date) = time.get(latest_version).and_then(Value::as_str) {
-                if let Some(age_hours) = parse_age_hours(publish_date) {
-                    if age_hours < 168 && !is_trusted {
-                        findings.push(AuditFinding {
-                            file_path: file_path.to_string(),
-                            line_number: None,
-                            rule_id: "deep-version-too-new".to_string(),
-                            severity: Severity::High,
-                            description: format!(
-                                "Latest version of '{}' (v{}) was published only {} hours ago ({} days). New versions may contain malicious code from compromised credentials",
-                                dep.name,
-                                latest_version,
-                                age_hours,
-                                age_hours / 24
-                            ),
-                            matched_pattern: "version published recently".to_string(),
-                            context_lines: vec![format!(
-                                "Pin to an older version or wait until the version is at least 7 days old"
-                            )],
-                        });
-                    }
-                }
+            meta.latest_version = Some(latest_version.to_string());
+            if let Some(pub_date) = time.get(latest_version).and_then(Value::as_str) {
+                meta.latest_publish_date = DateTime::parse_from_rfc3339(pub_date)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc));
             }
         }
-
         if let Some(created) = time.get("created").and_then(Value::as_str) {
-            if let Some(age_hours) = parse_age_hours(created) {
-                if age_hours < 720 {
-                    let age_days = age_hours / 24;
-                    findings.push(AuditFinding {
-                        file_path: file_path.to_string(),
-                        line_number: None,
-                        rule_id: "deep-new-package".to_string(),
-                        severity: Severity::Medium,
-                        description: format!(
-                            "Package '{}' was first published {} days ago. New packages are higher risk — verify this is legitimate",
-                            dep.name, age_days
-                        ),
-                        matched_pattern: "recently created package".to_string(),
-                        context_lines: vec![format!(
-                            "Check {} on n{}.com and its source repository before depending on it",
-                            dep.name, "pmjs"
-                        )],
-                    });
-                }
-            }
+            meta.created_date = DateTime::parse_from_rfc3339(created)
+                .ok()
+                .map(|d| d.with_timezone(&Utc));
+        }
+    }
+    // Weekly downloads — only fetched here on cache miss; only used for direct deps later.
+    let dl_url = format!("https://api.npmjs.org/downloads/point/last-week/{}", name);
+    if let Ok(dl_response) = client.get(&dl_url).send().await {
+        if let Ok(dl_body) = dl_response.json::<Value>().await {
+            meta.weekly_downloads = dl_body.get("downloads").and_then(Value::as_u64);
+        }
+    }
+    FetchOutcome::Ok(meta)
+}
+
+fn findings_from_npm_meta(
+    meta: &RegistryMeta,
+    dep: &DepInfo,
+    file_path: &str,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
+
+    if let (Some(latest), Some(pub_date)) = (&meta.latest_version, meta.latest_publish_date) {
+        let age_hours = age_hours_from(pub_date);
+        if age_hours < 168 && !is_trusted {
+            findings.push(AuditFinding {
+                file_path: file_path.to_string(),
+                line_number: None,
+                rule_id: "deep-version-too-new".to_string(),
+                severity: Severity::High,
+                description: format!(
+                    "Latest version of '{}' (v{}) was published only {} hours ago ({} days). New versions may contain malicious code from compromised credentials",
+                    dep.name,
+                    latest,
+                    age_hours,
+                    age_hours / 24
+                ),
+                matched_pattern: "version published recently".to_string(),
+                context_lines: vec![format!(
+                    "Pin to an older version or wait until the version is at least 7 days old"
+                )],
+            });
         }
     }
 
-    // Download-count check: only for direct deps. Transitive low-download isn't actionable —
-    // you can't drop a transitive — and api.npmjs.org/downloads has a tighter rate limit (~5 r/s).
+    if let Some(created) = meta.created_date {
+        let age_hours = age_hours_from(created);
+        if age_hours < 720 {
+            let age_days = age_hours / 24;
+            findings.push(AuditFinding {
+                file_path: file_path.to_string(),
+                line_number: None,
+                rule_id: "deep-new-package".to_string(),
+                severity: Severity::Medium,
+                description: format!(
+                    "Package '{}' was first published {} days ago. New packages are higher risk — verify this is legitimate",
+                    dep.name, age_days
+                ),
+                matched_pattern: "recently created package".to_string(),
+                context_lines: vec![format!(
+                    "Check {} on n{}.com and its source repository before depending on it",
+                    dep.name, "pmjs"
+                )],
+            });
+        }
+    }
+
     if !dep.is_transitive {
-        let dl_url = format!(
-            "https://api.npmjs.org/downloads/point/last-week/{}",
-            dep.name
-        );
-        if let Ok(dl_response) = client.get(&dl_url).send().await {
-            if let Ok(dl_body) = dl_response.json::<Value>().await {
-                if let Some(downloads) = dl_body.get("downloads").and_then(Value::as_u64) {
-                    if downloads < 100 {
-                        findings.push(AuditFinding {
-                            file_path: file_path.to_string(),
-                            line_number: None,
-                            rule_id: "deep-low-downloads".to_string(),
-                            severity: Severity::Medium,
-                            description: format!(
-                                "Package '{}' has only {} weekly downloads. Low-download packages may be typosquats or hallucinated names",
-                                dep.name, downloads
-                            ),
-                            matched_pattern: "low download count".to_string(),
-                            context_lines: vec![format!(
-                                "Verify '{}' is the correct package name and not a typosquat",
-                                dep.name
-                            )],
-                        });
-                    }
-                }
+        if let Some(downloads) = meta.weekly_downloads {
+            if downloads < 100 {
+                findings.push(AuditFinding {
+                    file_path: file_path.to_string(),
+                    line_number: None,
+                    rule_id: "deep-low-downloads".to_string(),
+                    severity: Severity::Medium,
+                    description: format!(
+                        "Package '{}' has only {} weekly downloads. Low-download packages may be typosquats or hallucinated names",
+                        dep.name, downloads
+                    ),
+                    matched_pattern: "low download count".to_string(),
+                    context_lines: vec![format!(
+                        "Verify '{}' is the correct package name and not a typosquat",
+                        dep.name
+                    )],
+                });
             }
         }
     }
 
     findings
+}
+
+fn age_hours_from(dt: DateTime<Utc>) -> u64 {
+    let diff = Utc::now().signed_duration_since(dt);
+    if diff.num_seconds() < 0 {
+        0
+    } else {
+        diff.num_hours() as u64
+    }
 }
 
 async fn check_composer_packages(

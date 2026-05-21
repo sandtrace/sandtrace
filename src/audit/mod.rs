@@ -1,4 +1,5 @@
 pub mod obfuscation;
+pub mod registry_cache;
 pub mod registry_checks;
 pub mod scanner;
 

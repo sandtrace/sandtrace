@@ -450,42 +450,26 @@ pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
             });
         }
 
-        // Check for minVersionAge (npm v11+ feature) — blocks recently published versions
-        let has_min_version_age = content.lines().any(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with('#')
-                && !trimmed.starts_with(';')
-                && (trimmed.contains("minVersionAge") || trimmed.contains("min-version-age"))
-        });
-
-        if !has_min_version_age {
-            findings.push(AuditFinding {
-                file_path,
-                line_number: None,
-                rule_id: "supply-chain-npmrc-no-version-age-gate".to_string(),
-                severity: Severity::Medium,
-                description: ".npmrc does not set minVersionAge — newly published malicious versions can install immediately. The LiteLLM attack (March 2026) would have been blocked by a 7-day age gate".to_string(),
-                matched_pattern: "minVersionAge not set".to_string(),
-                context_lines: vec![
-                    "Add 'minVersionAge=7d' to .npmrc to block versions published less than 7 days ago".to_string(),
-                    "Requires npm v11+. Prevents supply-chain attacks via compromised publish credentials".to_string(),
-                ],
-            });
-        }
+        // NOTE: the release-age gate (npm `min-release-age`, pnpm/yarn/bun
+        // equivalents) is audited authoritatively in registry_config_audit.rs
+        // with the correct per-manager key names and units. It is intentionally
+        // NOT checked here — an earlier version of this block looked for a
+        // fabricated `minVersionAge` key (no such npm setting exists) and
+        // double-flagged every .npmrc. See `config-npm-cooldown-*` rules.
     } else {
-        // No .npmrc at all — scripts are enabled by default
+        // No .npmrc at all — scripts are enabled by default.
         let file_path = pkg_json.to_string_lossy().to_string();
         findings.push(AuditFinding {
             file_path,
             line_number: None,
             rule_id: "supply-chain-npmrc-missing".to_string(),
             severity: Severity::Medium,
-            description: "No .npmrc found — npm install scripts are enabled by default and no version age gate is set".to_string(),
+            description: "No .npmrc found — npm install scripts are enabled by default".to_string(),
             matched_pattern: ".npmrc missing".to_string(),
             context_lines: vec![
                 "Create .npmrc with these security settings:".to_string(),
                 "  ignore-scripts=true".to_string(),
-                "  minVersionAge=7d".to_string(),
+                "  min-release-age=7   # npm 11.10+, unit: days".to_string(),
             ],
         });
     }
@@ -874,5 +858,35 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-proxy-reflect"));
+    }
+
+    #[test]
+    fn npmrc_with_ignore_scripts_no_fake_version_age_finding() {
+        // Regression: the old code flagged every .npmrc that lacked a fabricated
+        // `minVersionAge` key (no such npm setting exists). The real release-age
+        // gate is audited in registry_config_audit.rs. A normal .npmrc must not
+        // produce supply-chain-npmrc-no-version-age-gate anymore.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".npmrc"),
+            "@scope:registry=https://npm.pkg.github.com\nignore-scripts=true\n",
+        )
+        .unwrap();
+
+        let findings = check_npmrc_script_policy(dir.path());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "supply-chain-npmrc-no-version-age-gate"),
+            "fabricated minVersionAge rule must be gone, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+        // ignore-scripts=true is present, so no scripts-enabled finding either.
+        assert!(findings.is_empty(), "expected clean, got: {findings:?}");
     }
 }

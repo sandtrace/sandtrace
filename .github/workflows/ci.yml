@@ -54,7 +54,13 @@ jobs:
         run: sandtrace audit . --format sarif --severity medium > sandtrace.sarif || true
 
       - name: Upload SARIF to GitHub Security
+        # Non-blocking: code-scanning upload requires GitHub Advanced Security,
+        # which is not enabled on this private repo. Without it the API returns
+        # "Resource not accessible by integration". The audit/scan steps above
+        # are the actual gate; this upload is supplementary, so a failure here
+        # must not fail CI.
         if: always() && github.event_name == 'push'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: sandtrace.sarif

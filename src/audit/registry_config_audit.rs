@@ -25,6 +25,11 @@ const YARN_THRESHOLD_MINUTES: u64 = 7 * 24 * 60; // 10_080
 const BUN_THRESHOLD_SECONDS: u64 = 7 * 24 * 60 * 60; // 604_800
 
 const PNPM_MIN_VERSION_FOR_COOLDOWN: (u32, u32) = (10, 16);
+/// pnpm 11.0 ships `minimumReleaseAge=1440` (1 day) ON by default. A project
+/// pinned to pnpm 11+ has a baseline cooldown even with no explicit setting, so
+/// "missing" is not a finding (the default is active). Below 11, the default is
+/// 0 (immediate), so an explicit setting is required.
+const PNPM_DEFAULT_GATE_VERSION: (u32, u32) = (11, 0);
 
 /// Entry point: walk the target dir for config files and audit each.
 pub fn check_registry_configs(target: &Path) -> Vec<AuditFinding> {
@@ -236,49 +241,70 @@ fn parse_npm_release_age_days(raw: &str) -> Option<u64> {
 fn audit_pnpm(target: &Path) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
 
+    // pnpm merges minimumReleaseAge from several sources. Scan all of them; the
+    // setting is only "missing" if absent everywhere. Sources, in pnpm's own
+    // precedence order (first hit wins for the *value* we report):
+    //   1. pnpm-workspace.yaml         (canonical, pnpm 11+)
+    //   2. package.json "pnpm" key     (most stable location for pnpm 10.x)
+    //   3. .npmrc                      (legacy pnpm 10.x)
+    //   4. ~/.config/pnpm/config.yaml  (user-wide, pnpm 11+)
     let workspace = target.join("pnpm-workspace.yaml");
     let npmrc = target.join(".npmrc");
+    let pkg_json = target.join("package.json");
     let user_config = std::env::var("HOME")
         .ok()
         .map(|h| PathBuf::from(h).join(".config/pnpm/config.yaml"));
 
-    // Priority: pnpm-workspace.yaml (canonical 11+) > .npmrc (legacy) > user config.
-    let (config_path, value): (Option<PathBuf>, Option<(usize, String)>) =
-        if let Ok(content) = std::fs::read_to_string(&workspace) {
-            (
-                Some(workspace.clone()),
-                find_yaml_scalar(&content, "minimumReleaseAge"),
-            )
-        } else if let Ok(content) = std::fs::read_to_string(&npmrc) {
-            let v = parse_ini_lines(&content)
-                .into_iter()
-                .find(|(_, k, _)| k == "minimumReleaseAge")
-                .map(|(n, _, v)| (n, v));
-            (Some(npmrc.clone()), v)
-        } else if let Some(uc) = user_config.as_ref() {
-            if let Ok(content) = std::fs::read_to_string(uc) {
-                let v = find_yaml_scalar(&content, "minimumReleaseAge");
-                (Some(uc.clone()), v)
-            } else {
-                (None, None)
+    let mut resolved: Option<(PathBuf, usize, String)> = None;
+    let mut take = |path: &Path, found: Option<(usize, String)>| {
+        if resolved.is_none() {
+            if let Some((line, val)) = found {
+                resolved = Some((path.to_path_buf(), line, val));
             }
-        } else {
-            (None, None)
-        };
+        }
+    };
 
-    let file_path = config_path
+    if let Ok(content) = std::fs::read_to_string(&workspace) {
+        take(&workspace, find_yaml_scalar(&content, "minimumReleaseAge"));
+    }
+    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+        take(&pkg_json, find_pnpm_key_in_package_json(&content));
+    }
+    if let Ok(content) = std::fs::read_to_string(&npmrc) {
+        let v = parse_ini_lines(&content)
+            .into_iter()
+            .find(|(_, k, _)| k == "minimumReleaseAge")
+            .map(|(n, _, v)| (n, v));
+        take(&npmrc, v);
+    }
+    if let Some(uc) = user_config.as_ref() {
+        if let Ok(content) = std::fs::read_to_string(uc) {
+            take(uc, find_yaml_scalar(&content, "minimumReleaseAge"));
+        }
+    }
+
+    let value = resolved.as_ref().map(|(_, line, val)| (*line, val.clone()));
+    let file_path = resolved
         .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "pnpm-workspace.yaml".to_string());
+        .map(|(p, _, _)| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| workspace.to_string_lossy().to_string());
 
     match value {
         None => {
+            // pnpm 11+ ships a 1440-minute (1 day) default gate. If the project
+            // pins pnpm 11+, the cooldown is active even with no explicit value,
+            // so "missing" is not a finding. Below 11 the default is 0 — flag it.
+            if let Some(ver) = detect_pnpm_major_minor(target) {
+                if !version_lt(ver, PNPM_DEFAULT_GATE_VERSION) {
+                    return findings;
+                }
+            }
             findings.push(AuditFinding {
                 file_path: file_path.clone(),
                 line_number: None,
                 rule_id: "config-pnpm-cooldown-missing".to_string(),
                 severity: Severity::High,
-                description: "pnpm minimumReleaseAge is not set. Versions younger than 7 days install during a Shai-Hulud-class incident. Requires pnpm 10.16+. (pnpm 11+ defaults to 1440 minutes = 1 day, but that is below the 7-day threshold.)".to_string(),
+                description: "pnpm minimumReleaseAge is not set in any config source (pnpm-workspace.yaml, package.json#pnpm, .npmrc, or ~/.config/pnpm/config.yaml). On pnpm 10.x the default is 0 (immediate), so versions younger than 7 days install during a Shai-Hulud-class incident. Set it explicitly, or pin pnpm 11+ (which defaults to a 1-day gate).".to_string(),
                 matched_pattern: "minimumReleaseAge unset".to_string(),
                 context_lines: vec![
                     "Recommended pnpm-workspace.yaml:".to_string(),
@@ -342,22 +368,38 @@ fn find_yaml_scalar(content: &str, key: &str) -> Option<(usize, String)> {
     None
 }
 
+/// Reads `minimumReleaseAge` from the `pnpm` object in package.json. pnpm 10.x
+/// treats this as the most stable per-project location. Returns (line, value);
+/// line is best-effort (the line the key text appears on, else 1).
+fn find_pnpm_key_in_package_json(content: &str) -> Option<(usize, String)> {
+    let json = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let val = json.get("pnpm")?.get("minimumReleaseAge")?;
+    let raw = match val {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => return None,
+    };
+    let line = content
+        .lines()
+        .position(|l| l.contains("minimumReleaseAge"))
+        .map(|i| i + 1)
+        .unwrap_or(1);
+    Some((line, raw))
+}
+
+/// Parses the pnpm version pinned by package.json#packageManager (e.g.
+/// "pnpm@11.1.3" → (11, 1)). None if absent or not a pnpm pin.
+fn detect_pnpm_major_minor(target: &Path) -> Option<(u32, u32)> {
+    let content = std::fs::read_to_string(target.join("package.json")).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let pm = json.get("packageManager").and_then(|v| v.as_str())?;
+    let version = pm.strip_prefix("pnpm@")?;
+    parse_semver_major_minor(version)
+}
+
 fn audit_pnpm_version(target: &Path) -> Vec<AuditFinding> {
     let pkg_json = target.join("package.json");
-    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return Vec::new();
-    };
-    let Some(pm) = json.get("packageManager").and_then(|v| v.as_str()) else {
-        return Vec::new();
-    };
-    if !pm.starts_with("pnpm@") {
-        return Vec::new();
-    }
-    let version = &pm[5..];
-    let Some(parsed) = parse_semver_major_minor(version) else {
+    let Some(parsed) = detect_pnpm_major_minor(target) else {
         return Vec::new();
     };
     if version_lt(parsed, PNPM_MIN_VERSION_FOR_COOLDOWN) {
@@ -367,8 +409,8 @@ fn audit_pnpm_version(target: &Path) -> Vec<AuditFinding> {
             rule_id: "config-pnpm-stale".to_string(),
             severity: Severity::Medium,
             description: format!(
-                "package.json#packageManager pins pnpm@{version}. Versions before {}.{} do not support minimumReleaseAge — the cooldown setting silently does nothing.",
-                PNPM_MIN_VERSION_FOR_COOLDOWN.0, PNPM_MIN_VERSION_FOR_COOLDOWN.1
+                "package.json#packageManager pins pnpm@{}.{}. Versions before {}.{} do not support minimumReleaseAge — the cooldown setting silently does nothing.",
+                parsed.0, parsed.1, PNPM_MIN_VERSION_FOR_COOLDOWN.0, PNPM_MIN_VERSION_FOR_COOLDOWN.1
             ),
             matched_pattern: "pnpm version below 10.16".to_string(),
             context_lines: vec!["Bump packageManager to pnpm@10.16.0 or later".to_string()],
@@ -794,6 +836,91 @@ mod tests {
         write(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'");
         let findings = check_registry_configs(dir.path());
         assert!(!findings.iter().any(|f| f.rule_id == "config-pnpm-stale"));
+    }
+
+    #[test]
+    fn pnpm_cooldown_in_npmrc_satisfies_when_workspace_present() {
+        // Regression: pnpm-workspace.yaml present but WITHOUT the key, while
+        // .npmrc HAS it. Old code stopped at the workspace file and falsely
+        // flagged missing. pnpm merges sources — must be clean.
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/*'\n",
+        );
+        write(dir.path(), ".npmrc", "minimumReleaseAge=10080\n");
+        write(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'");
+        write(dir.path(), "package.json", "{}");
+        let findings = check_registry_configs(dir.path());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id.starts_with("config-pnpm-cooldown-")),
+            "value in .npmrc should satisfy the gate, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pnpm_cooldown_in_package_json_pnpm_key_satisfies() {
+        // package.json#pnpm.minimumReleaseAge is the canonical pnpm 10.x spot.
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"pnpm":{"minimumReleaseAge":10080}}"#,
+        );
+        write(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'");
+        let findings = check_registry_configs(dir.path());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id.starts_with("config-pnpm-cooldown-")),
+            "value in package.json#pnpm should satisfy the gate, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pnpm11_default_gate_suppresses_missing() {
+        // pnpm 11+ ships minimumReleaseAge=1440 ON by default. A project pinned
+        // to pnpm 11+ with no explicit value has an active gate — not "missing".
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"packageManager":"pnpm@11.1.3"}"#,
+        );
+        write(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'");
+        let findings = check_registry_configs(dir.path());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "config-pnpm-cooldown-missing"),
+            "pnpm 11+ default gate should suppress missing finding, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pnpm10_missing_still_flagged() {
+        // pnpm 10.x default is 0 (immediate). Missing must still flag.
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"packageManager":"pnpm@10.16.0"}"#,
+        );
+        write(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'");
+        let findings = check_registry_configs(dir.path());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "config-pnpm-cooldown-missing"),
+            "pnpm 10.x with no gate must flag missing, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
     }
 
     // ─── yarn audits ────────────────────────────────────────────────────

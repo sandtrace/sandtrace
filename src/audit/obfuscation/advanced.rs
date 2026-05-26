@@ -24,6 +24,33 @@ static RE_PHP_CREATE_FUNCTION: Lazy<Regex> =
 
 static RE_PHP_BACKTICK: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
 
+// PHP heredoc/nowdoc opener: `<<<LABEL`, `<<<'LABEL'`, `<<<"LABEL"`.
+// Captures the label so we can match the closer.
+static RE_HEREDOC_OPEN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<<<['"]?([A-Za-z_]\w*)['"]?"#).unwrap());
+
+/// If `line` opens a PHP heredoc/nowdoc, returns its label. Heredoc bodies are
+/// string content, not executable code, so the backtick-exec rule must be
+/// suppressed inside them (markdown docs commonly use backticks).
+pub fn heredoc_open_label(line: &str) -> Option<String> {
+    RE_HEREDOC_OPEN.captures(line).map(|c| c[1].to_string())
+}
+
+/// True if `line` closes a heredoc/nowdoc with the given `label`. PHP requires
+/// the closing identifier at the start of the line (optionally indented since
+/// 7.3), followed by `;`, `,`, or end of line.
+pub fn heredoc_closes(line: &str, label: &str) -> bool {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix(label) {
+        matches!(
+            rest.chars().next(),
+            None | Some(';') | Some(',') | Some(')')
+        )
+    } else {
+        false
+    }
+}
+
 static RE_PYTHON_IMPORT_OS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"__import__\s*\(\s*['"]os['"]\s*\)"#).unwrap());
 
@@ -138,6 +165,7 @@ pub fn scan_line(
     line_number: usize,
     file_path: &str,
     path: &Path,
+    in_heredoc: bool,
     findings: &mut Vec<AuditFinding>,
 ) {
     // Rule 9: Nested atob() chains / long atob payloads
@@ -228,7 +256,9 @@ pub fn scan_line(
     }
 
     // Rule 16: PHP backtick execution
-    if is_language(path, &["php"]) && RE_PHP_BACKTICK.is_match(line) {
+    // Skip when inside a heredoc/nowdoc body — that is string content (e.g.
+    // markdown docs with inline-code backticks), not the execution operator.
+    if is_language(path, &["php"]) && !in_heredoc && RE_PHP_BACKTICK.is_match(line) {
         let trimmed = line.trim();
         // Skip comment lines (// # * | for PHP/Laravel docblocks)
         let is_comment_line = trimmed.starts_with("//")
@@ -488,7 +518,14 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()
@@ -557,7 +594,14 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()
@@ -574,11 +618,57 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-php-backtick"));
+    }
+
+    #[test]
+    fn test_php_backtick_suppressed_in_heredoc() {
+        // Markdown doc content inside a heredoc/nowdoc body has inline-code
+        // backticks but is NOT the execution operator. in_heredoc=true skips it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("DocsSeeder.php");
+        let mut findings = Vec::new();
+        scan_line(
+            "Sandtrace reads config at `~/.sandtrace/config.toml` or `.sandtrace.toml`.",
+            1,
+            &path.to_string_lossy(),
+            &path,
+            true, // inside heredoc body
+            &mut findings,
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-php-backtick"),
+            "backticks in a heredoc body must not flag, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_heredoc_helpers() {
+        assert_eq!(heredoc_open_label("$x = <<<'MD'"), Some("MD".to_string()));
+        assert_eq!(
+            heredoc_open_label("    'content' => <<<EOT"),
+            Some("EOT".to_string())
+        );
+        assert_eq!(heredoc_open_label("$x = `whoami`;"), None);
+        assert!(heredoc_closes("MD;", "MD"));
+        assert!(heredoc_closes("    MD", "MD"));
+        assert!(heredoc_closes("EOT,", "EOT"));
+        assert!(!heredoc_closes("MDfoo", "MD")); // label must be the whole token
+        assert!(!heredoc_closes("some text", "MD"));
     }
 
     #[test]
@@ -592,7 +682,14 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()
@@ -610,7 +707,14 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()
@@ -628,7 +732,14 @@ mod tests {
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
-            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
         }
         assert!(findings
             .iter()

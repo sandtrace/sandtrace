@@ -218,8 +218,27 @@ pub fn scan_file(
     let lines: Vec<&str> = content.lines().collect();
     let skip_hidden_content = is_non_executable(path) || is_minified(&lines);
 
+    // Track PHP heredoc/nowdoc state so rules that key off raw line content
+    // (e.g. backtick-exec) can ignore string-literal bodies.
+    let mut heredoc_label: Option<String> = None;
+
     for (i, line) in lines.iter().enumerate() {
         let line_number = i + 1;
+
+        // Update heredoc state. A closing line ends the body; the body covers
+        // the lines between the opener and closer (the opener line itself is
+        // not body, so detect open after using the current `in_heredoc`).
+        let in_heredoc = if let Some(label) = heredoc_label.clone() {
+            if advanced::heredoc_closes(line, &label) {
+                heredoc_label = None;
+            }
+            true
+        } else {
+            if let Some(label) = advanced::heredoc_open_label(line) {
+                heredoc_label = Some(label);
+            }
+            false
+        };
 
         // Inline suppression: previous line contains @sandtrace-ignore or sandtrace:ignore
         if i > 0 {
@@ -296,7 +315,14 @@ pub fn scan_file(
         encoding::scan_line(line, line_number, &file_path_str, path, &mut findings);
 
         // --- New rules: Tier 2 (advanced) ---
-        advanced::scan_line(line, line_number, &file_path_str, path, &mut findings);
+        advanced::scan_line(
+            line,
+            line_number,
+            &file_path_str,
+            path,
+            in_heredoc,
+            &mut findings,
+        );
 
         // --- New rules: Tier 3 (supply chain per-line) ---
         supply_chain::scan_line(line, line_number, &file_path_str, path, &mut findings);

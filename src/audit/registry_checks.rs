@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,6 +50,43 @@ fn npm_registry_base() -> String {
 fn npm_downloads_base() -> String {
     std::env::var("SANDTRACE_NPM_DOWNLOADS")
         .unwrap_or_else(|_| "https://api.npmjs.org/downloads/point/last-week".to_string())
+}
+
+/// Collect npm scopes that `.npmrc` maps to a non-default registry, e.g.
+/// `@cc-consulting-nv:registry=https://npm.pkg.github.com`. Such scopes resolve
+/// to a private registry that the public-npm existence check cannot see, so a
+/// 404 there is not a typosquat — it must not produce deep-package-not-found.
+/// Returns scopes WITH the leading `@` (e.g. "@cc-consulting-nv").
+fn private_npm_scopes(dir: &Path) -> HashSet<String> {
+    let mut scopes = HashSet::new();
+    let Ok(content) = std::fs::read_to_string(dir.join(".npmrc")) else {
+        return scopes;
+    };
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        // Match `@scope:registry=<url>`
+        if let Some((key, _val)) = line.split_once('=') {
+            let key = key.trim();
+            if let Some(scope) = key.strip_suffix(":registry") {
+                if scope.starts_with('@') {
+                    scopes.insert(scope.to_string());
+                }
+            }
+        }
+    }
+    scopes
+}
+
+/// True if `pkg` belongs to one of the private scopes (matches `@scope/...`).
+fn is_private_scoped(pkg: &str, private_scopes: &HashSet<String>) -> bool {
+    if let Some((scope, _rest)) = pkg.split_once('/') {
+        private_scopes.contains(scope)
+    } else {
+        false
+    }
 }
 
 fn packagist_base() -> String {
@@ -683,6 +720,7 @@ async fn check_npm_packages(
     sem: Arc<Semaphore>,
 ) -> Vec<AuditFinding> {
     let file_path = dir.join("package.json").to_string_lossy().to_string();
+    let private_scopes = Arc::new(private_npm_scopes(dir));
     let mut tasks = tokio::task::JoinSet::new();
     let total = deps.len();
     let progress = deep_check_progress("npm", total as u64);
@@ -690,6 +728,7 @@ async fn check_npm_packages(
         let client = client.clone();
         let sem = sem.clone();
         let file_path = file_path.clone();
+        let private_scopes = private_scopes.clone();
         tasks.spawn(async move {
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
@@ -700,7 +739,7 @@ async fn check_npm_packages(
                     };
                 }
             };
-            check_one_npm_package(&client, &dep, &file_path).await
+            check_one_npm_package(&client, &dep, &file_path, &private_scopes).await
         });
     }
     let mut findings = Vec::new();
@@ -724,8 +763,23 @@ async fn check_npm_packages(
     findings
 }
 
-async fn check_one_npm_package(client: &Client, dep: &DepInfo, file_path: &str) -> CheckResult {
+async fn check_one_npm_package(
+    client: &Client,
+    dep: &DepInfo,
+    file_path: &str,
+    private_scopes: &HashSet<String>,
+) -> CheckResult {
     let is_trusted = TRUSTED_NPM_PACKAGES.iter().any(|&t| t == dep.name);
+
+    // Packages in a privately-scoped registry (per .npmrc) can't be verified
+    // against public npm. Skip the deep checks entirely rather than false-flag
+    // a legitimate private package as a typosquat.
+    if is_private_scoped(&dep.name, private_scopes) {
+        return CheckResult {
+            findings: Vec::new(),
+            fetch_failed: false,
+        };
+    }
 
     // Transitive + trusted: skip the registry entirely. Trust here is on volume —
     // these packages publish constantly with huge weekly downloads; the existence
@@ -890,7 +944,12 @@ fn findings_from_npm_meta(
 
     if let (Some(latest), Some(pub_date)) = (&meta.latest_version, meta.latest_publish_date) {
         let age_hours = age_hours_from(pub_date);
-        if age_hours < 168 && !is_trusted {
+        // Only flag DIRECT deps. The check looks at the registry's *latest*
+        // version age, not the lockfile-pinned version actually installed. For
+        // transitive deps (which the user doesn't choose), a freshly-published
+        // upstream release is noise — it fires on every healthy, actively
+        // maintained package and is unusable as a gate.
+        if age_hours < 168 && !is_trusted && !dep.is_transitive {
             findings.push(AuditFinding {
                 file_path: file_path.to_string(),
                 line_number: None,
@@ -1546,6 +1605,45 @@ mod tests {
         );
     }
 
+    /// Transitive deps must NOT trigger version-too-new: the check reads the
+    /// registry's latest-version age, not the lockfile-pinned version, so it is
+    /// noise for deps the user doesn't choose (e.g. a fresh babel release).
+    #[test]
+    fn transitive_recent_publish_not_flagged() {
+        let recent = Utc::now() - chrono::Duration::hours(43); // babel-7.29.7 case
+        let old = Utc::now() - chrono::Duration::days(365);
+        let meta = meta_with_dates("npm", "@babel/core", recent, old, Some(50_000_000));
+        let findings =
+            findings_from_npm_meta(&meta, &dep("@babel/core", true, false), "package.json");
+        assert!(
+            findings.iter().all(|f| f.rule_id != "deep-version-too-new"),
+            "transitive dep with fresh upstream release must not flag version-too-new"
+        );
+    }
+
+    #[test]
+    fn private_scopes_parsed_from_npmrc() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            ".npmrc",
+            "@cc-consulting-nv:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\nregistry=https://registry.npmjs.org\n",
+        );
+        let scopes = private_npm_scopes(dir.path());
+        assert!(scopes.contains("@cc-consulting-nv"));
+        assert!(is_private_scoped("@cc-consulting-nv/ccsdk", &scopes));
+        assert!(!is_private_scoped("react", &scopes));
+        assert!(!is_private_scoped("@babel/core", &scopes));
+    }
+
+    #[test]
+    fn private_scopes_empty_without_npmrc() {
+        let dir = TempDir::new().unwrap();
+        let scopes = private_npm_scopes(dir.path());
+        assert!(scopes.is_empty());
+        assert!(!is_private_scoped("@cc-consulting-nv/ccsdk", &scopes));
+    }
+
     /// REGRESSION: download-count check still fires for direct deps.
     #[test]
     fn direct_low_downloads_flagged() {
@@ -1691,10 +1789,12 @@ mod tests {
         let server = MockServer::start().await;
         let cache_dir = TempDir::new().unwrap();
         let project_dir = TempDir::new().unwrap();
+        // left-pad is a DIRECT dep here: version-too-new only flags direct deps
+        // (transitive freshness is noise — see transitive_recent_publish_not_flagged).
         write_project_file(
             project_dir.path(),
             "package.json",
-            r#"{"dependencies":{"lodash":"^4.0.0"}}"#,
+            r#"{"dependencies":{"lodash":"^4.0.0","left-pad":"^1.0.0"}}"#,
         );
         write_project_file(
             project_dir.path(),
@@ -1770,7 +1870,7 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.rule_id == "deep-version-too-new" && f.description.contains("left-pad")),
-            "untrusted transitive should be flagged"
+            "untrusted direct dep with recent publish should be flagged"
         );
     }
 

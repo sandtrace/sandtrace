@@ -89,6 +89,90 @@ fn is_private_scoped(pkg: &str, private_scopes: &HashSet<String>) -> bool {
     }
 }
 
+/// Extract a Composer `vendor/name` slug from a VCS/git/path repository URL,
+/// e.g. `https://github.com/cc-consulting-nv/laravel-cc-blog.git`
+/// -> `cc-consulting-nv/laravel-cc-blog`. Returns lowercase (Composer package
+/// names are case-insensitive). Handles `scp`-style git URLs
+/// (`git@github.com:vendor/name.git`) and trailing slashes. Returns None when
+/// the last two path segments can't be recovered.
+fn composer_slug_from_repo_url(url: &str) -> Option<String> {
+    // Strip a scheme (`https://`, `git://`, `ssh://`) or scp-style `user@host:`.
+    let rest = if let Some((_scheme, after)) = url.split_once("://") {
+        after
+    } else if let Some((_user_host, after)) = url.split_once(':') {
+        // scp-style `git@github.com:vendor/name.git`
+        after
+    } else {
+        url
+    };
+    let trimmed = rest.trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let name = segments[segments.len() - 1];
+    let vendor = segments[segments.len() - 2];
+    Some(format!("{}/{}", vendor, name).to_lowercase())
+}
+
+/// Collect Composer package names sourced from a declared non-Packagist
+/// `repositories` entry (vcs / git / github / gitlab / bitbucket / path /
+/// inline package). Such packages resolve from a private VCS/path source that
+/// the public-Packagist existence check cannot see, so a 404 there is not a
+/// hallucination — it must not produce deep-package-not-found.
+///
+/// For URL-bearing repos (vcs/git/path/...), the `vendor/name` slug is derived
+/// from the URL; for inline `{"type":"package", "package":{"name":...}}` repos
+/// the declared name is used directly. Names are stored lowercased to match
+/// Composer's case-insensitive package names.
+fn private_composer_packages(dir: &Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let Ok(content) = std::fs::read_to_string(dir.join("composer.json")) else {
+        return names;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        return names;
+    };
+
+    // `repositories` may be an array of repo objects, or an object keyed by
+    // repo name (Composer accepts both). Normalize to an iterator of values.
+    let repos: Vec<&Value> = match json.get("repositories") {
+        Some(Value::Array(arr)) => arr.iter().collect(),
+        Some(Value::Object(obj)) => obj.values().collect(),
+        _ => return names,
+    };
+
+    // URL-bearing repository types whose packages live outside Packagist.
+    const URL_REPO_TYPES: &[&str] = &["vcs", "git", "github", "gitlab", "bitbucket", "path"];
+
+    for repo in repos {
+        // `{"packagist.org": false}` disables the default repo; it carries no
+        // package of its own — skip without erroring.
+        let Some(repo_type) = repo.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+
+        if URL_REPO_TYPES.contains(&repo_type) {
+            if let Some(url) = repo.get("url").and_then(Value::as_str) {
+                if let Some(slug) = composer_slug_from_repo_url(url) {
+                    names.insert(slug);
+                }
+            }
+        } else if repo_type == "package" {
+            // Inline package definition declares the name directly.
+            if let Some(name) = repo
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+            {
+                names.insert(name.to_lowercase());
+            }
+        }
+    }
+    names
+}
+
 fn packagist_base() -> String {
     std::env::var("SANDTRACE_PACKAGIST")
         .unwrap_or_else(|_| "https://repo.packagist.org".to_string())
@@ -1049,6 +1133,7 @@ async fn check_composer_packages(
     sem: Arc<Semaphore>,
 ) -> Vec<AuditFinding> {
     let file_path = dir.join("composer.json").to_string_lossy().to_string();
+    let private_packages = Arc::new(private_composer_packages(dir));
     let mut tasks = tokio::task::JoinSet::new();
     let total = deps.len();
     let progress = deep_check_progress("packagist", total as u64);
@@ -1056,6 +1141,7 @@ async fn check_composer_packages(
         let client = client.clone();
         let sem = sem.clone();
         let file_path = file_path.clone();
+        let private_packages = private_packages.clone();
         tasks.spawn(async move {
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
@@ -1066,7 +1152,7 @@ async fn check_composer_packages(
                     };
                 }
             };
-            check_one_composer_package(&client, &dep, &file_path).await
+            check_one_composer_package(&client, &dep, &file_path, &private_packages).await
         });
     }
     let mut findings = Vec::new();
@@ -1094,8 +1180,20 @@ async fn check_one_composer_package(
     client: &Client,
     dep: &DepInfo,
     file_path: &str,
+    private_packages: &HashSet<String>,
 ) -> CheckResult {
     let is_trusted = TRUSTED_COMPOSER_PACKAGES.iter().any(|&t| t == dep.name);
+
+    // Packages sourced from a declared non-Packagist `repositories` entry
+    // (vcs/git/path/inline package) can't be verified against public Packagist.
+    // Skip the deep checks entirely rather than false-flag a legitimate private
+    // package as a hallucination. Package names are case-insensitive in Composer.
+    if private_packages.contains(&dep.name.to_lowercase()) {
+        return CheckResult {
+            findings: Vec::new(),
+            fetch_failed: false,
+        };
+    }
 
     // Transitive + trusted: skip Packagist entirely (same rationale as npm).
     if is_trusted && dep.is_transitive {
@@ -1644,6 +1742,99 @@ mod tests {
         assert!(!is_private_scoped("@cc-consulting-nv/ccsdk", &scopes));
     }
 
+    #[test]
+    fn composer_slug_from_vcs_url_variants() {
+        assert_eq!(
+            composer_slug_from_repo_url("https://github.com/cc-consulting-nv/laravel-cc-blog.git")
+                .as_deref(),
+            Some("cc-consulting-nv/laravel-cc-blog")
+        );
+        // No `.git` suffix, trailing slash.
+        assert_eq!(
+            composer_slug_from_repo_url("https://gitlab.com/acme/widget/").as_deref(),
+            Some("acme/widget")
+        );
+        // scp-style git URL.
+        assert_eq!(
+            composer_slug_from_repo_url("git@github.com:Acme/Widget.git").as_deref(),
+            Some("acme/widget")
+        );
+        // Relative path repo.
+        assert_eq!(
+            composer_slug_from_repo_url("../local/my-pkg").as_deref(),
+            Some("local/my-pkg")
+        );
+        // Too few segments -> None.
+        assert_eq!(composer_slug_from_repo_url("https://example.com"), None);
+    }
+
+    #[test]
+    fn private_composer_packages_from_vcs_repository() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{
+                "require": { "cc-consulting-nv/laravel-cc-blog": "^1.1.6" },
+                "repositories": [
+                    { "type": "vcs", "url": "https://github.com/cc-consulting-nv/laravel-cc-blog.git" }
+                ]
+            }"#,
+        );
+        let pkgs = private_composer_packages(dir.path());
+        assert!(pkgs.contains("cc-consulting-nv/laravel-cc-blog"));
+        // A normal Packagist package is not in the private set.
+        assert!(!pkgs.contains("laravel/framework"));
+    }
+
+    #[test]
+    fn private_composer_packages_inline_package_type() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{
+                "repositories": [
+                    { "type": "package", "package": { "name": "Acme/Special", "version": "1.0.0" } }
+                ]
+            }"#,
+        );
+        let pkgs = private_composer_packages(dir.path());
+        // Stored lowercased (Composer names are case-insensitive).
+        assert!(pkgs.contains("acme/special"));
+    }
+
+    #[test]
+    fn private_composer_packages_object_form_repositories() {
+        // Composer also accepts `repositories` keyed by name.
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{
+                "repositories": {
+                    "blog": { "type": "vcs", "url": "https://github.com/acme/blog.git" },
+                    "packagist.org": false
+                }
+            }"#,
+        );
+        let pkgs = private_composer_packages(dir.path());
+        assert!(pkgs.contains("acme/blog"));
+        // The `packagist.org: false` entry must not error or add a name.
+        assert_eq!(pkgs.len(), 1);
+    }
+
+    #[test]
+    fn private_composer_packages_empty_without_repositories() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{ "require": { "laravel/framework": "^12.0" } }"#,
+        );
+        assert!(private_composer_packages(dir.path()).is_empty());
+    }
+
     /// REGRESSION: download-count check still fires for direct deps.
     #[test]
     fn direct_low_downloads_flagged() {
@@ -1990,5 +2181,56 @@ mod tests {
             .expect("404 should produce deep-package-not-found");
         assert_eq!(nf.severity, Severity::Critical);
         assert!(nf.description.contains("hallucinated-pkg-name"));
+    }
+
+    /// REGRESSION (issue #23): a private Composer package sourced from a declared
+    /// `vcs` repository returns 404 on public Packagist but must NOT be flagged
+    /// as deep-package-not-found.
+    #[tokio::test]
+    async fn e2e_composer_vcs_package_not_flagged_on_packagist_404() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let server = MockServer::start().await;
+        let cache_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        write_project_file(
+            project_dir.path(),
+            "composer.json",
+            r#"{
+                "require": { "cc-consulting-nv/laravel-cc-blog": "^1.1.6" },
+                "repositories": [
+                    { "type": "vcs", "url": "https://github.com/cc-consulting-nv/laravel-cc-blog.git" }
+                ]
+            }"#,
+        );
+        // Packagist would 404 this private package; the VCS-repo guard must skip
+        // the lookup before this ever fires.
+        Mock::given(method("GET"))
+            .and(wm_path("/p2/cc-consulting-nv/laravel-cc-blog.json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        unsafe {
+            std::env::set_var("SANDTRACE_PACKAGIST", server.uri());
+            std::env::set_var("SANDTRACE_CACHE_DIR", cache_dir.path());
+        }
+        let findings = tokio::task::spawn_blocking({
+            let p = project_dir.path().to_path_buf();
+            move || run_deep_checks(&p)
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var("SANDTRACE_PACKAGIST");
+            std::env::remove_var("SANDTRACE_CACHE_DIR");
+        }
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "deep-package-not-found"),
+            "private VCS-sourced Composer package must not be flagged as not-found, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
     }
 }

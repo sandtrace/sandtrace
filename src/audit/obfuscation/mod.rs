@@ -455,6 +455,15 @@ fn check_homoglyphs(
 ) {
     for (i, line) in lines.iter().enumerate() {
         let line_number = i + 1;
+
+        // Inline suppression: previous line contains @sandtrace-ignore or sandtrace:ignore
+        if i > 0 {
+            let prev = lines[i - 1].to_lowercase();
+            if prev.contains("@sandtrace-ignore") || prev.contains("sandtrace:ignore") {
+                continue;
+            }
+        }
+
         let mut found_homoglyphs = Vec::new();
 
         for ch in line.chars() {
@@ -508,6 +517,39 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
+    }
+
+    #[test]
+    fn test_homoglyph_suppressed_by_ignore_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.ts");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        write!(
+            file,
+            "// @sandtrace-ignore\nconst text = `\u{03B8} angle \u{03C6} phi`;\n"
+        )
+        .unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-homoglyph"),
+            "homoglyph finding should be suppressed by @sandtrace-ignore on the previous line"
+        );
+    }
+
+    #[test]
+    fn test_homoglyph_flagged_without_ignore_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.ts");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        write!(file, "const text = `\u{03B8} angle \u{03C6} phi`;\n").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-homoglyph"));
     }
 
     #[test]

@@ -34,6 +34,28 @@ pub const HOMOGLYPH_RANGES: &[(char, char, &str)] = &[
     ('\u{0391}', '\u{03C9}', "Greek"),    // Α-ω
 ];
 
+/// Text file extensions where raw control bytes are never legitimate. Broader
+/// than `SOURCE_EXTENSIONS` (which gates byte-level magic checks) so the
+/// control-byte rule covers .ts/.tsx/.vue/.md and config formats too.
+const TEXT_EXTENSIONS: &[&str] = &[
+    "js", "ts", "jsx", "tsx", "mjs", "cjs", "vue", "svelte", "py", "rb", "php", "go", "rs", "java",
+    "kt", "swift", "scala", "c", "cc", "cpp", "h", "hpp", "cs", "sh", "bash", "zsh", "fish", "pl",
+    "pm", "lua", "r", "dart", "ex", "exs", "clj", "css", "scss", "sass", "less", "sql", "graphql",
+    "gql", "html", "htm", "xml", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "md",
+    "markdown", "txt", "rst", "adoc", "csv", "tsv",
+];
+
+/// Whether a file's extension marks it as text (control bytes never legitimate).
+fn is_text_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| {
+            let lower = ext.to_ascii_lowercase();
+            TEXT_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
 /// Check if a file has one of the given extensions.
 pub fn is_language(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
@@ -203,6 +225,13 @@ pub fn scan_file(
 
     // Rule 10: Polyglot detection (binary magic bytes in source files)
     if let Some(finding) = advanced::check_polyglot(&raw_bytes, &file_path_str, path) {
+        findings.push(finding);
+    }
+
+    // Rule 23: Raw control bytes in text source files. Runs on raw bytes before
+    // the UTF-8 conversion so it catches NUL (which makes git classify the file
+    // binary and blanks it from review) even in otherwise-undecodable files.
+    if let Some(finding) = check_control_bytes(&raw_bytes, &file_path_str, path) {
         findings.push(finding);
     }
 
@@ -495,6 +524,86 @@ fn check_homoglyphs(
     }
 }
 
+/// Rule 23: Raw control bytes in text source files.
+///
+/// Flags ASCII control bytes outside the allowed set {0x09 TAB, 0x0A LF,
+/// 0x0D CR} plus 0x7F DEL. A literal NUL (0x00) is HIGH because git's binary
+/// heuristic classifies any file containing one as binary, blanking it from
+/// `git diff` and PR review; the rest are MEDIUM. The escape forms (` `,
+/// `\x1b`, …) are plain ASCII and never trip this rule.
+fn check_control_bytes(raw_bytes: &[u8], file_path: &str, path: &Path) -> Option<AuditFinding> {
+    if !is_text_extension(path) {
+        return None;
+    }
+
+    // First offset seen per byte value, with its line/col, in encounter order.
+    let mut seen: Vec<(u8, usize, usize, usize)> = Vec::new();
+    let mut line = 1usize;
+    let mut col = 1usize;
+    // Cache of "this line is suppressed by an @sandtrace-ignore on the line above".
+    let mut prev_line_ignored = false;
+    let mut line_start = 0usize;
+    let mut suppress_current = false;
+
+    for (offset, &b) in raw_bytes.iter().enumerate() {
+        if b == b'\n' {
+            // Recompute suppression for the *next* line from the line just ended.
+            let ended = &raw_bytes[line_start..offset];
+            let ended_lower = String::from_utf8_lossy(ended).to_lowercase();
+            prev_line_ignored = ended_lower.contains("@sandtrace-ignore")
+                || ended_lower.contains("sandtrace:ignore");
+            line += 1;
+            col = 1;
+            line_start = offset + 1;
+            suppress_current = prev_line_ignored;
+            continue;
+        }
+
+        let is_allowed = matches!(b, b'\t' | b'\r' | b'\n');
+        let is_control = b < 0x20 || b == 0x7F;
+        if is_control && !is_allowed && !suppress_current && !seen.iter().any(|(v, ..)| *v == b) {
+            seen.push((b, offset, line, col));
+        }
+
+        // Column advances per byte; good enough for ASCII control reporting.
+        col += 1;
+    }
+
+    if seen.is_empty() {
+        return None;
+    }
+
+    // NUL is HIGH (forces git binary classification → unreviewable); rest MEDIUM.
+    let severity = if seen.iter().any(|(b, ..)| *b == 0x00) {
+        Severity::High
+    } else {
+        Severity::Medium
+    };
+
+    let details: Vec<String> = seen
+        .iter()
+        .map(|(b, offset, line, col)| {
+            format!(
+                "0x{:02X} at byte {} (line {}, col {})",
+                b, offset, line, col
+            )
+        })
+        .collect();
+
+    Some(AuditFinding {
+        file_path: file_path.to_string(),
+        line_number: seen.first().map(|(_, _, line, _)| *line),
+        rule_id: "obfuscation-control-bytes".to_string(),
+        severity,
+        description: format!(
+            "Raw control byte(s) in text file — replace with escape sequence (\\u0000, \\x1b, …): {}",
+            details.join(", ")
+        ),
+        matched_pattern: "raw control byte".to_string(),
+        context_lines: details,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +659,112 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-homoglyph"));
+    }
+
+    #[test]
+    fn test_nul_byte_flagged_high() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("payload.ts");
+        std::fs::write(
+            &file_path,
+            b"export const SEP = \"\x00\";\nexport const ok = 1;\n",
+        )
+        .unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "obfuscation-control-bytes")
+            .expect("NUL byte should be flagged");
+        assert_eq!(f.severity, Severity::High);
+        assert!(f.description.contains("0x00"));
+    }
+
+    #[test]
+    fn test_other_control_byte_flagged_medium() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.js");
+        // 0x1B (ESC) — control byte, not NUL → MEDIUM.
+        std::fs::write(&file_path, b"const x = \"\x1b[31m\";\n").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "obfuscation-control-bytes")
+            .expect("ESC byte should be flagged");
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.description.contains("0x1B"));
+    }
+
+    #[test]
+    fn test_escape_sequence_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.ts");
+        // The 7-char ASCII escape " " must NOT flag — no raw control byte.
+        std::fs::write(&file_path, b"export const SEP = \"\\u0000\";\n").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-control-bytes"));
+    }
+
+    #[test]
+    fn test_control_bytes_allow_tab_lf_cr() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.py");
+        // TAB indentation + CRLF line endings — all allowed.
+        std::fs::write(&file_path, b"def f():\r\n\tx = 1\r\n\treturn x\r\n").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-control-bytes"));
+    }
+
+    #[test]
+    fn test_control_bytes_multibyte_utf8_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.md");
+        // Emoji + accented text — multibyte UTF-8, no control bytes.
+        std::fs::write(&file_path, "# Héllo 🌍 — façade\nrésumé café\n".as_bytes()).unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-control-bytes"));
+    }
+
+    #[test]
+    fn test_control_bytes_suppressed_by_ignore_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.ts");
+        std::fs::write(
+            &file_path,
+            b"// @sandtrace-ignore\nexport const SEP = \"\x00\";\n",
+        )
+        .unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-control-bytes"),
+            "control-byte finding should be suppressed by @sandtrace-ignore on the previous line"
+        );
+    }
+
+    #[test]
+    fn test_control_bytes_skipped_for_non_text_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        // A .bin file with a NUL — not a text extension, so not our concern.
+        let file_path = dir.path().join("blob.bin");
+        std::fs::write(&file_path, b"\x00\x01\x02data").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-control-bytes"));
     }
 
     #[test]

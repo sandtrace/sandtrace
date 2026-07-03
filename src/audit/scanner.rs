@@ -107,7 +107,10 @@ const CREDENTIAL_PATTERNS: &[ContentPattern] = &[
         rule_id: "cred-aws-key",
         description: "AWS Access Key ID found in source",
         severity: Severity::Critical,
-        pattern: r"(?i)AKIA[0-9A-Z]{16}",
+        // Real AWS access key IDs are always uppercase AKIA + 16 uppercase-alnum.
+        // Case-insensitive matching false-positived on lowercase runs inside base64
+        // integrity hashes in lockfiles (e.g. "...yakiA0123456789abcdef...").
+        pattern: r"AKIA[0-9A-Z]{16}",
     },
     ContentPattern {
         rule_id: "cred-private-key",
@@ -285,6 +288,25 @@ pub fn scan_file_content(
 
     // Skip config files that are not secrets containers
     if file_name == ".claude.json" {
+        return Ok(findings);
+    }
+
+    // Skip dependency lockfiles. They are machine-generated (nobody hand-pastes a
+    // secret into one) and are dense with base64 integrity hashes that false-positive
+    // against credential patterns. ponytail: exact-name match, extend list if a new
+    // package manager shows up.
+    const LOCKFILES: &[&str] = &[
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "npm-shrinkwrap.json",
+        "composer.lock",
+        "Cargo.lock",
+        "poetry.lock",
+        "Gemfile.lock",
+        "bun.lockb",
+    ];
+    if LOCKFILES.contains(&file_name) {
         return Ok(findings);
     }
 
@@ -592,6 +614,33 @@ mod tests {
         let findings = scan_file_content(&file_path, &test_config()).unwrap();
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "cred-aws-key");
+    }
+
+    #[test]
+    fn test_aws_key_requires_uppercase() {
+        // Lowercase "akia" runs inside base64 integrity hashes must not match.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("config.js");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "const hash = 'sha512-yakiA0123456789abcdefXYZ';").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.is_empty(),
+            "lowercase akia in a hash must not match cred-aws-key"
+        );
+    }
+
+    #[test]
+    fn test_skip_lockfile() {
+        // A real-looking uppercase AWS key inside a lockfile must be skipped entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("pnpm-lock.yaml");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "  resolution: {{integrity: AKIAI44QH8DHBG5BREAL}}").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(findings.is_empty(), "lockfiles must be skipped");
     }
 
     #[test]

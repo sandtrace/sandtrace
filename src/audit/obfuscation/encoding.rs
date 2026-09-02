@@ -31,6 +31,16 @@ static RE_CONSTRUCTOR_CHAIN: Lazy<Regex> =
 static RE_PHP_VAR_FUNC: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\$\w+\s*=\s*['"](\w+)['"]"#).unwrap());
 
+// A class property declaration (`protected static string $navigationGroup = 'System';`)
+// is a string assignment, not a variable function. PHP forbids calling a property
+// as `$navigationGroup()`, so these can never be the variable-function vector.
+// ponytail: line-local check; a real `$f = 'system';` followed by `$f($cmd);` on a
+// later line still fires, because that form has no modifier/type before the `$`.
+static RE_PHP_PROPERTY_DECL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(public|protected|private|static|const|readonly|var)\b[^;=]*\$\w+\s*=")
+        .unwrap()
+});
+
 // NOTE: bare `/bin/sh` / `/bin/bash` are intentionally NOT listed here. They
 // match the `#!/bin/bash` shebang every legitimate hook carries, producing a
 // CRITICAL false positive on normal hooks. The real injection vector is a hook
@@ -153,7 +163,7 @@ pub fn scan_line(
     }
 
     // Rule 8: PHP variable function calls
-    if is_language(path, &["php"]) {
+    if is_language(path, &["php"]) && !RE_PHP_PROPERTY_DECL.is_match(line) {
         if let Some(caps) = RE_PHP_VAR_FUNC.captures(line) {
             if let Some(func_name) = caps.get(1) {
                 let lower = func_name.as_str().to_lowercase();
@@ -391,6 +401,29 @@ mod tests {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
         assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-variable-function"));
+    }
+
+    #[test]
+    fn test_php_property_decl_not_variable_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.php");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"    protected static string|\UnitEnum|null $navigationGroup = 'System';"#
+        )
+        .unwrap();
+        writeln!(f, r#"    private string $mode = 'exec';"#).unwrap();
+        writeln!(f, r#"    public const KIND = 'eval';"#).unwrap();
+
+        let mut findings = Vec::new();
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in content.lines().enumerate() {
+            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+        }
+        assert!(!findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-php-variable-function"));
     }

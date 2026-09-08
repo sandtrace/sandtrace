@@ -248,8 +248,11 @@ pub fn scan_file(
     let skip_hidden_content = is_non_executable(path) || is_minified(&lines);
 
     // Track PHP heredoc/nowdoc state so rules that key off raw line content
-    // (e.g. backtick-exec) can ignore string-literal bodies.
+    // (e.g. backtick-exec) can ignore string-literal bodies. Multi-line block
+    // comments (Blade `{{-- --}}`, C-style `/* */`) are tracked the same way:
+    // their bodies are prose, so backticks there are markdown, not exec.
     let mut heredoc_label: Option<String> = None;
+    let mut in_block_comment = false;
 
     for (i, line) in lines.iter().enumerate() {
         let line_number = i + 1;
@@ -268,6 +271,23 @@ pub fn scan_file(
             }
             false
         };
+
+        // Update block-comment state. Like heredoc, the opener line itself is
+        // not body, so detect open after using the current `in_block_comment`.
+        let in_comment_body = if in_block_comment {
+            if advanced::block_comment_closes(line) {
+                in_block_comment = false;
+            }
+            true
+        } else {
+            if advanced::block_comment_opens(line) {
+                in_block_comment = true;
+            }
+            false
+        };
+
+        // Both heredoc bodies and block-comment bodies are non-executable text.
+        let in_heredoc = in_heredoc || in_comment_body;
 
         // Inline suppression: previous line contains @sandtrace-ignore or sandtrace:ignore
         if i > 0 {

@@ -467,16 +467,47 @@ fn collect_npm_v1_deps(
     }
 }
 
+/// Return the last non-null document of a pnpm lockfile YAML stream.
+///
+/// pnpm 12 emits two documents: the first pins pnpm's own binaries under
+/// `importers.<.>.packageManagerDependencies`, the second is the project
+/// lockfile. Both carry `lockfileVersion: '9.0'`, so document position is the
+/// only signal. For a single-document lockfile the last document is the only one.
+fn last_pnpm_lock_document(content: &str) -> Result<serde_yml::Value, serde_yml::Error> {
+    use serde::Deserialize;
+
+    let mut last = None;
+    for document in serde_yml::Deserializer::from_str(content) {
+        let value = serde_yml::Value::deserialize(document)?;
+        if !value.is_null() {
+            last = Some(value);
+        }
+    }
+    Ok(last.unwrap_or(serde_yml::Value::Null))
+}
+
 /// Parse pnpm-lock.yaml. Uses `packages:` map for all resolved entries (transitive),
 /// and `importers.<.>.dependencies` / `devDependencies` for direct.
+///
+/// pnpm 12 writes the lockfile as two YAML documents; the project lockfile is the
+/// last one. See `last_pnpm_lock_document`.
 fn parse_pnpm_lock(lock_path: &Path, manifest_path: Option<&Path>) -> Vec<DepInfo> {
     let content = match std::fs::read_to_string(lock_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let yaml: serde_yml::Value = match serde_yml::from_str(&content) {
+    let yaml = match last_pnpm_lock_document(&content) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            // An unreadable lockfile yields no dependencies, which would otherwise
+            // look identical to a project that has none. Say so.
+            eprintln!(
+                "Warning: skipping {} — could not parse lockfile: {}",
+                lock_path.display(),
+                e
+            );
+            return Vec::new();
+        }
     };
 
     let mut deps = Vec::new();
@@ -1317,6 +1348,143 @@ mod tests {
 
     fn now_fixed() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap()
+    }
+
+    /// pnpm 12 lockfile: document 1 pins pnpm's own binaries, document 2 is the
+    /// project lockfile. Both carry lockfileVersion '9.0'.
+    const PNPM12_MULTI_DOC: &str = r#"---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.4.0
+        version: 12.4.0
+
+packages: {}
+
+snapshots: {}
+
+---
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: 1.3.0
+        version: 1.3.0
+
+packages:
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-stub==}
+
+snapshots:
+
+  left-pad@1.3.0: {}
+"#;
+
+    /// The project-lockfile document on its own, as pnpm 11 would have written it.
+    fn pnpm12_project_document_only() -> String {
+        PNPM12_MULTI_DOC
+            .split("---")
+            .last()
+            .expect("stream has a last document")
+            .to_string()
+    }
+
+    fn write_lock(dir: &std::path::Path, contents: &str) -> std::path::PathBuf {
+        let path = dir.join("pnpm-lock.yaml");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn pnpm_multi_document_lockfile_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lock(dir.path(), PNPM12_MULTI_DOC);
+
+        let deps = parse_pnpm_lock(&path, None);
+
+        let names: Vec<_> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["left-pad"],
+            "multi-document lockfile must yield the project dependencies"
+        );
+    }
+
+    #[test]
+    fn pnpm_multi_document_matches_single_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let multi = dir.path().join("multi");
+        let single = dir.path().join("single");
+        std::fs::create_dir_all(&multi).unwrap();
+        std::fs::create_dir_all(&single).unwrap();
+
+        let multi_path = write_lock(&multi, PNPM12_MULTI_DOC);
+        let single_path = write_lock(&single, &pnpm12_project_document_only());
+
+        let from_multi = parse_pnpm_lock(&multi_path, None);
+        let from_single = parse_pnpm_lock(&single_path, None);
+
+        let key = |deps: &[DepInfo]| {
+            let mut v: Vec<_> = deps
+                .iter()
+                .map(|d| (d.name.clone(), d.version_spec.clone(), d.is_transitive))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            key(&from_multi),
+            key(&from_single),
+            "wrapping a lockfile in a second document must not change its dependencies"
+        );
+    }
+
+    /// The package manager pins itself under `packageManagerDependencies` in the
+    /// first document. That is build tooling, not a project dependency.
+    #[test]
+    fn pnpm_package_manager_dependencies_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lock(dir.path(), PNPM12_MULTI_DOC);
+
+        let deps = parse_pnpm_lock(&path, None);
+
+        assert!(
+            !deps.iter().any(|d| d.name == "pnpm"),
+            "pnpm's own binary must not appear as a project dependency: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pnpm_single_document_lockfile_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lock(dir.path(), &pnpm12_project_document_only());
+
+        let deps = parse_pnpm_lock(&path, None);
+
+        assert_eq!(deps.len(), 1, "single-document lockfiles must keep working");
+    }
+
+    #[test]
+    fn pnpm_unparsable_lockfile_yields_no_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lock(dir.path(), "lockfileVersion: '9.0'\n  bad: [indent");
+
+        let deps = parse_pnpm_lock(&path, None);
+
+        assert!(deps.is_empty());
     }
 
     #[test]

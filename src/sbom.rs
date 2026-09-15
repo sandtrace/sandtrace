@@ -1137,12 +1137,35 @@ fn parse_toml_file(path: &Path) -> Result<toml::Value> {
     .with_context(|| format!("failed to parse {}", path.display()))
 }
 
+/// Parse a YAML file, taking the last document in the stream.
+///
+/// pnpm 12 writes `pnpm-lock.yaml` as two documents: the first pins pnpm's own
+/// binaries under `importers.<.>.packageManagerDependencies`, the second is the
+/// project lockfile. The project lockfile is last, and for a single-document
+/// file the last document is the only one.
 fn parse_yaml_as_json(path: &Path) -> Result<Value> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let yaml: serde_yml::Value = serde_yml::from_str(&content)
+    let yaml = last_yaml_document(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     serde_json::to_value(yaml).with_context(|| format!("failed to normalize {}", path.display()))
+}
+
+/// Deserialize a YAML stream and return its last non-null document.
+///
+/// Errors if the stream is empty or any document fails to parse — a lockfile we
+/// cannot read must be loud, not silently treated as having no dependencies.
+fn last_yaml_document(content: &str) -> Result<serde_yml::Value> {
+    use serde::Deserialize;
+
+    let mut last = None;
+    for document in serde_yml::Deserializer::from_str(content) {
+        let value = serde_yml::Value::deserialize(document)?;
+        if !value.is_null() {
+            last = Some(value);
+        }
+    }
+    last.ok_or_else(|| anyhow::anyhow!("YAML stream contained no documents"))
 }
 
 fn parse_pnpm_package_key(key: &str) -> Option<(String, String)> {
@@ -4376,6 +4399,116 @@ packages:
             .iter()
             .any(|component| component.bom_ref == "pkg:npm/react@18.3.1"));
         assert_eq!(bom.dependencies[0].depends_on, vec!["pkg:npm/react@18.3.1"]);
+    }
+
+    /// pnpm 12 writes two documents: the first pins pnpm's own binaries, the
+    /// second is the project lockfile. Regression for issue #36 — this used to
+    /// fail with "deserializing from YAML containing more than one document is
+    /// not supported".
+    #[test]
+    fn parses_pnpm12_multi_document_lock() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::json!({
+                "name": "demo",
+                "version": "1.0.0",
+                "packageManager": "pnpm@12.4.0",
+                "dependencies": { "react": "^18.3.1" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            r#"---
+lockfileVersion: '9.0'
+importers:
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.4.0
+        version: 12.4.0
+packages: {}
+snapshots: {}
+---
+lockfileVersion: '9.0'
+settings:
+  autoInstallPeers: true
+importers:
+  .:
+    dependencies:
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+packages:
+  react@18.3.1:
+    resolution: {integrity: sha512-demo}
+"#,
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+
+        assert!(bom
+            .components
+            .iter()
+            .any(|component| component.bom_ref == "pkg:npm/react@18.3.1"));
+        assert_eq!(bom.dependencies[0].depends_on, vec!["pkg:npm/react@18.3.1"]);
+    }
+
+    /// The package manager pins itself in the first document. That is build
+    /// tooling, not a project dependency, so it stays out of the SBOM.
+    #[test]
+    fn pnpm12_package_manager_dependencies_excluded_from_sbom() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::json!({
+                "name": "demo",
+                "version": "1.0.0",
+                "packageManager": "pnpm@12.4.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            r#"---
+lockfileVersion: '9.0'
+importers:
+  .:
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.4.0
+        version: 12.4.0
+      '@pnpm/exe':
+        specifier: 12.4.0
+        version: 12.4.0
+packages: {}
+snapshots: {}
+---
+lockfileVersion: '9.0'
+settings:
+  autoInstallPeers: true
+importers:
+  .: {}
+packages: {}
+snapshots: {}
+"#,
+        )
+        .unwrap();
+
+        let bom = build_sbom(dir.path()).unwrap();
+
+        assert!(
+            !bom.components
+                .iter()
+                .any(|component| component.name.contains("pnpm")),
+            "pnpm's own binaries must not appear as project components: {:?}",
+            bom.components.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

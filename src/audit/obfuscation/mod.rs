@@ -56,6 +56,54 @@ fn is_text_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the bytes are a real binary format wearing a text extension.
+///
+/// `.ts` is the offender in practice: it means TypeScript, MPEG transport
+/// stream, and (via PyTorch/zip) a model archive. Extension alone can't tell
+/// them apart, so rules that assume "text" sniff the content first. Detects by
+/// format signature rather than by banning the extension, so obfuscated
+/// TypeScript still gets scanned.
+pub fn is_binary_content(raw_bytes: &[u8]) -> bool {
+    // ponytail: signature + NUL heuristic, no libmagic dep. Add formats as they show up.
+    const BINARY_MAGIC: &[&[u8]] = &[
+        b"PK\x03\x04",   // zip / jar / pytorch .pt / safetensors-in-zip
+        b"PK\x05\x06",   // empty zip
+        b"PK\x07\x08",   // spanned zip
+        b"\x7FELF",      // ELF
+        b"\x89PNG",      // PNG
+        b"\xFF\xD8\xFF", // JPEG
+        b"GIF87a",
+        b"GIF89a",
+        b"%PDF",
+        b"\x1A\x45\xDF\xA3", // Matroska / WebM
+        b"OggS",
+        b"\x00\x00\x01\xBA", // MPEG program stream
+        b"\x00\x00\x01\xB3", // MPEG video ES
+        b"fLaC",
+        b"\x89HDF",  // HDF5
+        b"\x80\x02", // python pickle protocol 2
+    ];
+    if BINARY_MAGIC.iter().any(|m| raw_bytes.starts_with(m)) {
+        return true;
+    }
+
+    // ISO-BMFF (mp4/mov): "ftyp" at offset 4.
+    if raw_bytes.len() >= 12 && &raw_bytes[4..8] == b"ftyp" {
+        return true;
+    }
+
+    // MPEG-TS: 0x47 sync byte every 188 bytes. Check several packets so a
+    // TypeScript file that merely starts with 'G' can't match.
+    if raw_bytes.first() == Some(&0x47) {
+        let packets = (raw_bytes.len() / 188).min(10);
+        if packets >= 3 && (0..packets).all(|i| raw_bytes[i * 188] == 0x47) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Check if a file has one of the given extensions.
 pub fn is_language(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
@@ -552,7 +600,7 @@ fn check_homoglyphs(
 /// `git diff` and PR review; the rest are MEDIUM. The escape forms (` `,
 /// `\x1b`, …) are plain ASCII and never trip this rule.
 fn check_control_bytes(raw_bytes: &[u8], file_path: &str, path: &Path) -> Option<AuditFinding> {
-    if !is_text_extension(path) {
+    if !is_text_extension(path) || is_binary_content(raw_bytes) {
         return None;
     }
 

@@ -477,99 +477,98 @@ pub fn check_npmrc_script_policy(dir: &Path) -> Vec<AuditFinding> {
     findings
 }
 
-/// Check for unpinned dependency versions in package.json.
+/// Check for unpinned dependency versions in package.json / composer.json.
 /// Unpinned versions (^, ~, *, >=, latest) let attackers publish a malicious
 /// patch that auto-installs. Pinned versions (exact like "1.2.3") are safer.
+///
+/// A committed lockfile pins the resolved versions, so `npm ci` / `composer install`
+/// never picks up a fresh malicious patch. Ranges only resolve on an explicit
+/// `update`, so a manifest with a lockfile beside it is reported at Low.
 pub fn check_unpinned_versions(dir: &Path) -> Vec<AuditFinding> {
+    // (manifest, dep sections, lockfiles that pin it)
+    let manifests: [(&str, &[&str], &[&str]); 2] = [
+        (
+            "package.json",
+            &["dependencies", "devDependencies", "optionalDependencies"],
+            &[
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "npm-shrinkwrap.json",
+            ],
+        ),
+        (
+            "composer.json",
+            &["require", "require-dev"],
+            &["composer.lock"],
+        ),
+    ];
+
     let mut findings = Vec::new();
 
-    let pkg_json = dir.join("package.json");
-    if !pkg_json.exists() {
-        return findings;
-    }
-
-    let content = match std::fs::read_to_string(&pkg_json) {
-        Ok(c) => c,
-        Err(_) => return findings,
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return findings,
-    };
-
-    let file_path = pkg_json.to_string_lossy().to_string();
-    let dep_sections = ["dependencies", "devDependencies", "optionalDependencies"];
-    let mut unpinned_count = 0u32;
-    let mut unpinned_examples = Vec::new();
-
-    for section in &dep_sections {
-        if let Some(deps) = json.get(*section).and_then(|v| v.as_object()) {
-            for (name, version) in deps {
-                if let Some(ver) = version.as_str() {
-                    if is_unpinned_version(ver) {
-                        unpinned_count += 1;
-                        if unpinned_examples.len() < 5 {
-                            unpinned_examples.push(format!("{}@{}", name, ver));
-                        }
-                    }
-                }
-            }
+    for (manifest, sections, lockfiles) in manifests {
+        let path = dir.join(manifest);
+        if !path.exists() {
+            continue;
         }
-    }
 
-    // Also check composer.json
-    let composer_json = dir.join("composer.json");
-    if composer_json.exists() {
-        if let Ok(content) = std::fs::read_to_string(&composer_json) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                let composer_file = composer_json.to_string_lossy().to_string();
-                let composer_sections = ["require", "require-dev"];
+        let json: serde_json::Value = match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+        {
+            Some(v) => v,
+            None => continue,
+        };
 
-                for section in &composer_sections {
-                    if let Some(deps) = json.get(*section).and_then(|v| v.as_object()) {
-                        for (name, version) in deps {
-                            if let Some(ver) = version.as_str() {
-                                if is_unpinned_version(ver) {
-                                    unpinned_count += 1;
-                                    if unpinned_examples.len() < 5 {
-                                        unpinned_examples.push(format!("{}@{}", name, ver));
-                                    }
-                                }
+        let mut count = 0u32;
+        let mut examples = Vec::new();
+
+        for section in sections {
+            if let Some(deps) = json.get(*section).and_then(|v| v.as_object()) {
+                for (name, version) in deps {
+                    if let Some(ver) = version.as_str() {
+                        if is_unpinned_version(ver) {
+                            count += 1;
+                            if examples.len() < 5 {
+                                examples.push(format!("{}@{}", name, ver));
                             }
                         }
                     }
                 }
-
-                if unpinned_count > 0
-                    && !findings
-                        .iter()
-                        .any(|f: &AuditFinding| f.file_path == composer_file)
-                {
-                    // Will be added below as a combined finding
-                }
             }
         }
-    }
 
-    if unpinned_count > 0 {
-        let severity = if unpinned_count > 10 {
-            Severity::Medium
-        } else {
+        if count == 0 {
+            continue;
+        }
+
+        let locked = lockfiles.iter().any(|f| dir.join(f).exists());
+        let severity = if locked || count <= 10 {
             Severity::Low
+        } else {
+            Severity::Medium
+        };
+
+        let description = if locked {
+            format!(
+                "{} dependencies in {} use version ranges (^, ~, *, >=). A lockfile pins the installed versions, so this only applies when someone runs an explicit update",
+                count, manifest
+            )
+        } else {
+            format!(
+                "{} dependencies in {} use unpinned versions (^, ~, *, >=) with no committed lockfile. Attackers can publish malicious patches that auto-install",
+                count, manifest
+            )
         };
 
         findings.push(AuditFinding {
-            file_path,
+            file_path: path.to_string_lossy().to_string(),
             line_number: None,
             rule_id: "supply-chain-unpinned-versions".to_string(),
             severity,
-            description: format!(
-                "{} dependencies use unpinned versions (^, ~, *, >=). Attackers can publish malicious patches that auto-install",
-                unpinned_count
-            ),
+            description,
             matched_pattern: "unpinned version range".to_string(),
-            context_lines: unpinned_examples,
+            context_lines: examples,
         });
     }
 
@@ -888,5 +887,55 @@ mod tests {
         );
         // ignore-scripts=true is present, so no scripts-enabled finding either.
         assert!(findings.is_empty(), "expected clean, got: {findings:?}");
+    }
+
+    #[test]
+    fn test_unpinned_versions_composer_only_and_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let composer =
+            r#"{"require":{"laravel/framework":"^12.0","aws/aws-sdk-php":"^3.369","a/b":"1.2.3"}}"#;
+        std::fs::write(dir.path().join("composer.json"), composer).unwrap();
+
+        // No package.json present: composer.json must still be scanned, and
+        // reported against its own path.
+        let findings = check_unpinned_versions(dir.path());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].file_path.ends_with("composer.json"));
+        assert!(findings[0].description.contains('2'));
+        assert!(!findings[0].description.contains("package.json"));
+
+        // A committed lockfile pins what installs, so this drops to Low.
+        std::fs::write(dir.path().join("composer.lock"), "{}").unwrap();
+        let findings = check_unpinned_versions(dir.path());
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].description.contains("lockfile pins"));
+    }
+
+    #[test]
+    fn test_unpinned_versions_reports_each_manifest_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies":{"react":"^18.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require":{"laravel/framework":"^12.0"}}"#,
+        )
+        .unwrap();
+
+        let findings = check_unpinned_versions(dir.path());
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .any(|f| f.file_path.ends_with("package.json")
+                && f.context_lines.iter().any(|c| c.starts_with("react@"))));
+        assert!(findings
+            .iter()
+            .any(|f| f.file_path.ends_with("composer.json")
+                && f.context_lines
+                    .iter()
+                    .any(|c| c.starts_with("laravel/framework@"))));
     }
 }

@@ -467,6 +467,9 @@ fn check_invisible_chars(
                         None // Likely emoji ZWJ sequence
                     }
                 }
+                // A BOM at the very start of the file is an encoding marker
+                // (Visual Studio / .NET templates emit it), not obfuscation.
+                '\u{FEFF}' if line_number == 1 && idx == 0 => None,
                 '\u{FEFF}' => Some("ZERO WIDTH NO-BREAK SPACE (BOM)"),
                 '\u{2060}' => Some("WORD JOINER"),
                 '\u{2061}' => Some("FUNCTION APPLICATION"),
@@ -987,6 +990,39 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-invisible-chars"));
+    }
+
+    #[test]
+    fn test_leading_bom_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("AboutAssets.txt");
+        std::fs::write(&file_path, "\u{FEFF}Any raw assets\r\nsecond line\r\n").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-invisible-chars"));
+    }
+
+    #[test]
+    fn test_bom_mid_file_still_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.js");
+        // Leading BOM is fine; the one mid-line and the one starting line 2 are not
+        std::fs::write(
+            &file_path,
+            "\u{FEFF}const a = 1;\n\u{FEFF}const b\u{FEFF} = 2;\n",
+        )
+        .unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        let hits: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-invisible-chars")
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_number, Some(2));
+        assert_eq!(hits[0].context_lines.len(), 2);
     }
 
     #[test]

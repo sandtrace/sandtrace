@@ -68,6 +68,76 @@ pub fn block_comment_closes(line: &str) -> bool {
     line.contains("--}}") || line.contains("*/")
 }
 
+/// Blanks the contents of PHP string literals on `line` so backticks inside
+/// them (markdown inline code, regexes that strip ``` fences) don't read as the
+/// execution operator. Left as-is, because PHP can execute them:
+/// - `{$...}` / `${...}` spans in double-quoted strings (`"{${`id`}}"` runs `id`)
+/// - everything from a quote that has no closing partner on the same line
+/// - whole lines mixing PHP with HTML/Blade, where an apostrophe in markup
+///   could pair with one on the far side of a PHP tag
+///
+/// ponytail: per-line, so a string spanning lines is not blanked (old behaviour).
+pub fn blank_php_strings(line: &str) -> String {
+    if ["<?", "?>", "{{", "{!!", "@php"]
+        .iter()
+        .any(|m| line.contains(m))
+    {
+        return line.to_string();
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = chars.clone();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            // Shell command: jump past it so quotes inside aren't read as strings.
+            '`' => match chars[i + 1..].iter().position(|&c| c == '`') {
+                Some(p) => i += p + 2,
+                None => break,
+            },
+            q @ ('\'' | '"') => {
+                let Some(end) = closing_quote(&chars, i + 1, q) else {
+                    break;
+                };
+                let mut depth = 0;
+                let mut j = i + 1;
+                while j < end {
+                    let c = chars[j];
+                    if depth > 0 {
+                        match c {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                    } else if q == '"' && c == '{' && chars[j + 1] == '$' {
+                        depth = 1;
+                    } else if q == '"' && c == '$' && chars[j + 1] == '{' {
+                        depth = 1;
+                        j += 1;
+                    } else {
+                        out[j] = ' ';
+                    }
+                    j += 1;
+                }
+                i = end + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn closing_quote(chars: &[char], from: usize, q: char) -> Option<usize> {
+    let mut k = from;
+    while k < chars.len() {
+        match chars[k] {
+            '\\' => k += 2,
+            c if c == q => return Some(k),
+            _ => k += 1,
+        }
+    }
+    None
+}
+
 static RE_PYTHON_IMPORT_OS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"__import__\s*\(\s*['"]os['"]\s*\)"#).unwrap());
 
@@ -275,8 +345,14 @@ pub fn scan_line(
     // Rule 16: PHP backtick execution
     // Skip when inside a heredoc/nowdoc body — that is string content (e.g.
     // markdown docs with inline-code backticks), not the execution operator.
-    if is_language(path, &["php"]) && !in_heredoc && RE_PHP_BACKTICK.is_match(line) {
-        let trimmed = line.trim();
+    // Backticks inside string literals are text too, so match against `code`.
+    let code = if is_language(path, &["php"]) && !in_heredoc {
+        blank_php_strings(line)
+    } else {
+        String::new()
+    };
+    if RE_PHP_BACKTICK.is_match(&code) {
+        let trimmed = code.trim();
         // Skip comment lines (// # * | for PHP/Laravel docblocks)
         let is_comment_line = trimmed.starts_with("//")
             || trimmed.starts_with('#')
@@ -284,13 +360,13 @@ pub fn scan_line(
             || trimmed.starts_with('|')
             || trimmed.starts_with("/*");
         // Skip lines with inline comments containing backticks (e.g. code // `foo`)
-        let has_inline_comment_backtick = line.contains("//") && {
-            let after_comment = &line[line.find("//").unwrap()..];
+        let has_inline_comment_backtick = code.contains("//") && {
+            let after_comment = &code[code.find("//").unwrap()..];
             after_comment.contains('`')
         };
         // Skip JS template literals inside Blade/PHP files (`...${...}...`)
-        let is_js_template_literal = RE_PHP_BACKTICK.find(line).is_some_and(|m| {
-            let inner = &line[m.start() + 1..m.end() - 1];
+        let is_js_template_literal = RE_PHP_BACKTICK.find(&code).is_some_and(|m| {
+            let inner = &code[m.start() + 1..m.end() - 1];
             inner.contains("${")
         });
         if !is_comment_line && !has_inline_comment_backtick && !is_js_template_literal {
@@ -808,6 +884,47 @@ mod tests {
             "real backtick exec after the comment closes must still report: {:?}",
             findings
         );
+    }
+
+    fn php_backtick_flagged(line: &str) -> bool {
+        let path = std::path::Path::new("test.php");
+        let mut findings = Vec::new();
+        scan_line(line, 1, "test.php", path, false, &mut findings);
+        findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-backtick")
+    }
+
+    #[test]
+    fn test_php_backtick_in_string_literal_not_flagged() {
+        for line in [
+            "return $this->error($id, -32602, 'Invalid params: tools/call requires `name`.');",
+            r"$cleaned = preg_replace('/^```(?:json)?\s*|\s*```$/m', '', $cleaned) ?? $cleaned;",
+            r#"$message = "[Noteward] {$signalPreview}\n\nReply `y {$pending->confirmation_code}` to confirm, `n {$pending->confirmation_code}` to cancel.";"#,
+            "return \"What's the question? Try `?summarize today` or `?find vllm`.\";",
+            r"$s = 'it\'s `not` exec';",
+        ] {
+            assert!(!php_backtick_flagged(line), "flagged: {line}");
+        }
+    }
+
+    #[test]
+    fn test_php_backtick_outside_string_still_flagged() {
+        for line in [
+            "$x = 'a' . `id` . 'b';",
+            "$x = `grep 'it' /etc/passwd`;",
+            "$s = \"don't\"; $o = `id`;",
+            // Interpolation in a double-quoted string evaluates its expression
+            "$x = \"{${`id`}}\";",
+            "$x = \"a {$o->{`id`}} b\";",
+            // Unclosed quote: nothing after it is blanked
+            "$x = `id`; // it's fine",
+            "echo 'unterminated `id`",
+            // Mixed HTML/PHP: an apostrophe in markup must not hide the tag
+            "it's <?= `id` ?> isn't",
+        ] {
+            assert!(php_backtick_flagged(line), "missed: {line}");
+        }
     }
 
     #[test]

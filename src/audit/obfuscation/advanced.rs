@@ -9,7 +9,9 @@ use super::{is_language, rot13, DANGEROUS_FUNCS, HOMOGLYPH_RANGES};
 
 static RE_ATOB_NESTED: Lazy<Regex> = Lazy::new(|| Regex::new(r"atob\s*\(\s*atob\s*\(").unwrap());
 
-static RE_ATOB_LONG: Lazy<Regex> = Lazy::new(|| Regex::new(r"atob\s*\([^)]{20,}\)").unwrap());
+// Inline base64 literal only; atob(expr) on runtime data (e.g. JWT decode) is not a payload.
+static RE_ATOB_LONG: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"atob\s*\(\s*["'`][A-Za-z0-9+/=_-]{20,}"#).unwrap());
 
 static RE_ROT13_PHP: Lazy<Regex> = Lazy::new(|| Regex::new(r"str_rot13\s*\(").unwrap());
 
@@ -675,6 +677,25 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-atob-chain"));
+    }
+
+    #[test]
+    fn test_atob_long_literal_vs_expression() {
+        let path = Path::new("test.js");
+        let scan = |line: &str| {
+            let mut findings = Vec::new();
+            scan_line(line, 1, "test.js", path, false, &mut findings);
+            findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-atob-chain")
+        };
+        assert!(scan(
+            "eval(atob('ZXZhbCgiYWxlcnQoMSkiKTsgZXZhbCgiYWxlcnQoMikiKQ=='));"
+        ));
+        assert!(!scan(
+            r#"const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "="));"#
+        ));
+        assert!(!scan("const s = atob(someVeryLongVariableNameHere);"));
     }
 
     #[test]

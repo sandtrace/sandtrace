@@ -26,6 +26,9 @@ static RE_PHP_CREATE_FUNCTION: Lazy<Regex> =
 
 static RE_PHP_BACKTICK: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
 
+// Blade comment `{{-- ... --}}`, or an opener running to end of line.
+static RE_BLADE_COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{\{--.*?(?:--\}\}|$)").unwrap());
+
 // PHP heredoc/nowdoc opener: `<<<LABEL`, `<<<'LABEL'`, `<<<"LABEL"`.
 // Captures the label so we can match the closer.
 static RE_HEREDOC_OPEN: Lazy<Regex> =
@@ -348,8 +351,11 @@ pub fn scan_line(
     // Skip when inside a heredoc/nowdoc body — that is string content (e.g.
     // markdown docs with inline-code backticks), not the execution operator.
     // Backticks inside string literals are text too, so match against `code`.
+    // Blade strips `{{-- --}}` comments at compile time, so drop them as well.
     let code = if is_language(path, &["php"]) && !in_heredoc {
-        blank_php_strings(line)
+        RE_BLADE_COMMENT
+            .replace_all(&blank_php_strings(line), "")
+            .into_owned()
     } else {
         String::new()
     };
@@ -820,6 +826,49 @@ mod tests {
             "backticks in a heredoc body must not flag, got: {:?}",
             findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_php_backtick_suppressed_in_blade_comment_opener() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("button.blade.php");
+        let lines = [
+            "{{-- so `before`/`after` icon slots need no markup.",
+            "    {{-- `one` liner --}}",
+            "<div>{{-- `inline` --}}</div>",
+        ];
+        let mut findings = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            scan_line(
+                line,
+                i + 1,
+                &path.to_string_lossy(),
+                &path,
+                false,
+                &mut findings,
+            );
+        }
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-php-backtick"),
+            "backticks in Blade comments must not flag, got: {:?}",
+            findings.iter().map(|f| f.line_number).collect::<Vec<_>>()
+        );
+
+        // Real backtick exec next to a Blade comment still flags.
+        let mut findings = Vec::new();
+        scan_line(
+            "<?php $x = `whoami`; ?> {{-- note --}}",
+            1,
+            &path.to_string_lossy(),
+            &path,
+            false,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-backtick"));
     }
 
     #[test]

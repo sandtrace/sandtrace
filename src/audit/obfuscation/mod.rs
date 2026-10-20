@@ -347,7 +347,19 @@ pub fn scan_file(
 
         // 1. Excessive trailing whitespace (steganographic payload indicator)
         let trailing_spaces = line.len() - line.trim_end().len();
-        if trailing_spaces > max_trailing {
+        // A blank line holding a prefix of a neighbour's indentation is editor
+        // auto-indent, not a payload.
+        let is_auto_indent = || {
+            line.trim().is_empty()
+                && [
+                    lines[..i].iter().rev().find(|l| !l.trim().is_empty()),
+                    lines[i + 1..].iter().find(|l| !l.trim().is_empty()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|l| l.starts_with(*line))
+        };
+        if trailing_spaces > max_trailing && !is_auto_indent() {
             findings.push(AuditFinding {
                 file_path: file_path_str.clone(),
                 line_number: Some(line_number),
@@ -950,6 +962,30 @@ mod tests {
             !hidden_findings.is_empty(),
             "standalone 'nc ' (netcat) should still be flagged"
         );
+    }
+
+    #[test]
+    fn test_blank_line_auto_indent_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("welcome.blade.php");
+        let indent = " ".repeat(24);
+        std::fs::write(
+            &file_path,
+            format!("{indent}</g>\n{indent}\n{indent}<g class=\"x\">\n"),
+        )
+        .unwrap();
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
+
+        // Wider than the neighbours' indentation still flags.
+        let wide = " ".repeat(40);
+        std::fs::write(&file_path, format!("{indent}</g>\n{wide}\n{indent}<g>\n")).unwrap();
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
     }
 
     #[test]

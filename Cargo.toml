@@ -1,6 +1,6 @@
 [package]
 name = "sandtrace"
-version = "0.3.28"
+version = "0.3.29"
 edition = "2021"
 rust-version = "1.87"
 authors = ["Sandtrace Contributors"]

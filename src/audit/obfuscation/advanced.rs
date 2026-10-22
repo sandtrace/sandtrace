@@ -21,8 +21,9 @@ static RE_ROT13_STRING_ARG: Lazy<Regex> =
 static RE_TEMPLATE_LITERAL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\$\{['"][^'"]+['"]\}\s*\$\{['"][^'"]+['"]\}"#).unwrap());
 
+// Needs an argument: `create_function()` with none runs nothing (prose/docs mention).
 static RE_PHP_CREATE_FUNCTION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"create_function\s*\(").unwrap());
+    Lazy::new(|| Regex::new(r"create_function\s*\(\s*[^\s)]").unwrap());
 
 static RE_PHP_BACKTICK: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
 
@@ -809,6 +810,15 @@ mod tests {
             );
         }
         assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-create-function"));
+
+        // Prose mention with no arguments is not a call.
+        let path = std::path::Path::new("php-upgrade.blade.php");
+        let mut findings = Vec::new();
+        let line = "<p>PHP 8.0 removed each() and create_function(). It also changed...</p>";
+        scan_line(line, 1, "php-upgrade.blade.php", path, false, &mut findings);
+        assert!(!findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-php-create-function"));
     }

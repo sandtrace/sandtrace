@@ -359,7 +359,10 @@ pub fn scan_file(
                 .flatten()
                 .any(|l| l.starts_with(*line))
         };
-        if trailing_spaces > max_trailing && !is_auto_indent() {
+        if trailing_spaces > max_trailing
+            && !is_auto_indent()
+            && !advanced::ends_inside_string(line)
+        {
             findings.push(AuditFinding {
                 file_path: file_path_str.clone(),
                 line_number: Some(line_number),
@@ -986,6 +989,34 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
+    }
+
+    #[test]
+    fn test_trailing_whitespace_inside_multiline_string_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("ArchiveUserFollowing.php");
+        let pad = " ".repeat(24);
+        std::fs::write(
+            &file_path,
+            format!("$q = 'DELETE FROM user_following uf{pad}\n\tWHERE 1 = 1';\n"),
+        )
+        .unwrap();
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
+
+        // Closed string, or an apostrophe in a comment, still flags.
+        for line in [
+            format!("$q = 'DELETE';{pad}\n"),
+            format!("$q = 1; // don't{pad}\n"),
+        ] {
+            std::fs::write(&file_path, line).unwrap();
+            let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+            assert!(findings
+                .iter()
+                .any(|f| f.rule_id == "obfuscation-trailing-whitespace"));
+        }
     }
 
     #[test]

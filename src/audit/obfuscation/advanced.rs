@@ -21,8 +21,9 @@ static RE_ROT13_STRING_ARG: Lazy<Regex> =
 static RE_TEMPLATE_LITERAL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\$\{['"][^'"]+['"]\}\s*\$\{['"][^'"]+['"]\}"#).unwrap());
 
+// Needs an argument: `create_function()` with none runs nothing (prose/docs mention).
 static RE_PHP_CREATE_FUNCTION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"create_function\s*\(").unwrap());
+    Lazy::new(|| Regex::new(r"create_function\s*\(\s*[^\s)]").unwrap());
 
 static RE_PHP_BACKTICK: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`]+`").unwrap());
 
@@ -79,12 +80,19 @@ pub fn block_comment_closes(line: &str) -> bool {
 /// - `{$...}` / `${...}` spans in double-quoted strings (`"{${`id`}}"` runs `id`)
 /// - everything from a quote that has no closing partner on the same line
 /// - whole lines mixing PHP with HTML/Blade, where an apostrophe in markup
-///   could pair with one on the far side of a PHP tag
+///   could pair with one on the far side of a PHP tag. Blade markers only
+///   count in Blade templates; in plain PHP, `{{` is text inside a string.
 ///
 /// ponytail: per-line, so a string spanning lines is not blanked (old behaviour).
-pub fn blank_php_strings(line: &str) -> String {
-    if ["<?", "?>", "{{", "{!!", "@php"]
+pub fn blank_php_strings(line: &str, is_blade: bool) -> String {
+    let blade_markers: &[&str] = if is_blade {
+        &["{{", "{!!", "@php"]
+    } else {
+        &[]
+    };
+    if ["<?", "?>"]
         .iter()
+        .chain(blade_markers)
         .any(|m| line.contains(m))
     {
         return line.to_string();
@@ -129,6 +137,29 @@ pub fn blank_php_strings(line: &str) -> String {
         }
     }
     out.into_iter().collect()
+}
+
+/// Returns true if `line` ends inside a quoted string that continues on the
+/// next line (e.g. a multi-line SQL literal), so trailing whitespace is string
+/// data. A `//` or `#` outside a string ends the scan, so apostrophes in
+/// comments don't count.
+/// shortcut: per-line quote tracking, so a line inside a string opened on an
+/// earlier line is not recognised; track state across lines if that shows up.
+pub fn ends_inside_string(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '#' => return false,
+            '/' if chars.get(i + 1) == Some(&'/') => return false,
+            q @ ('\'' | '"') => match closing_quote(&chars, i + 1, q) {
+                Some(end) => i = end + 1,
+                None => return true,
+            },
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn closing_quote(chars: &[char], from: usize, q: char) -> Option<usize> {
@@ -354,7 +385,10 @@ pub fn scan_line(
     // Blade strips `{{-- --}}` comments at compile time, so drop them as well.
     let code = if is_language(path, &["php"]) && !in_heredoc {
         RE_BLADE_COMMENT
-            .replace_all(&blank_php_strings(line), "")
+            .replace_all(
+                &blank_php_strings(line, file_path.ends_with(".blade.php")),
+                "",
+            )
             .into_owned()
     } else {
         String::new()
@@ -778,6 +812,15 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-php-create-function"));
+
+        // Prose mention with no arguments is not a call.
+        let path = std::path::Path::new("php-upgrade.blade.php");
+        let mut findings = Vec::new();
+        let line = "<p>PHP 8.0 removed each() and create_function(). It also changed...</p>";
+        scan_line(line, 1, "php-upgrade.blade.php", path, false, &mut findings);
+        assert!(!findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-create-function"));
     }
 
     #[test]
@@ -973,9 +1016,20 @@ mod tests {
             r#"$message = "[Noteward] {$signalPreview}\n\nReply `y {$pending->confirmation_code}` to confirm, `n {$pending->confirmation_code}` to cancel.";"#,
             "return \"What's the question? Try `?summarize today` or `?find vllm`.\";",
             r"$s = 'it\'s `not` exec';",
+            // Blade markup inside a string in a plain .php file is text
+            r#"$m->create(['body' => "Updated:\n\n```blade\n<h1>{{ \$title }}</h1>\n```\n\nTouched `app.css`."]);"#,
         ] {
             assert!(!php_backtick_flagged(line), "flagged: {line}");
         }
+
+        // In a Blade template, `{{` can open PHP, so the line is not blanked.
+        let path = std::path::Path::new("home.blade.php");
+        let mut findings = Vec::new();
+        let line = "<p>{{ 'x' }} it's `id`</p>";
+        scan_line(line, 1, "home.blade.php", path, false, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-php-backtick"));
     }
 
     #[test]

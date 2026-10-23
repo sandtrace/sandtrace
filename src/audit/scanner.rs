@@ -267,6 +267,25 @@ fn is_shell_variable_value(matched: &str) -> bool {
     false
 }
 
+/// Returns true if the quoted value is a template expression
+/// (e.g. Helm `password = "{{ .Values.db.password }}"`), injected at render time.
+fn is_template_value(matched: &str) -> bool {
+    matched
+        .find(['"', '\''])
+        .is_some_and(|q| matched[q + 1..].trim_start().starts_with("{{"))
+}
+
+/// Returns true if the keyword sits inside a string literal, so the quote after
+/// the separator closes that literal rather than opening a value
+/// (e.g. `'  Secret: '.($config['secret'] ? ...)`). `prefix` is the line text
+/// before the match.
+fn is_keyword_inside_string(prefix: &str, matched: &str) -> bool {
+    matched
+        .chars()
+        .find(|c| *c == '"' || *c == '\'')
+        .is_some_and(|q| prefix.matches(q).count() % 2 == 1)
+}
+
 pub fn scan_file_content(
     path: &Path,
     config: &SandtraceConfig,
@@ -457,7 +476,12 @@ pub fn scan_file_content(
 
             // Skip matches where the quoted value is a shell variable reference ($VAR).
             // Patterns like PASSWORD="$REDIS_PASSWORD" are dynamic, not hardcoded.
-            if is_shell_variable_value(mat.as_str()) {
+            if is_shell_variable_value(mat.as_str()) || is_template_value(mat.as_str()) {
+                continue;
+            }
+
+            let line_start = content[..mat.start()].rfind('\n').map_or(0, |p| p + 1);
+            if is_keyword_inside_string(&content[line_start..mat.start()], mat.as_str()) {
                 continue;
             }
 
@@ -1064,6 +1088,47 @@ mod tests {
             !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
             "Local test placeholder secrets should be skipped"
         );
+    }
+
+    #[test]
+    fn test_skip_template_password_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("pgcat.yaml");
+        std::fs::write(
+            &file_path,
+            "    admin_password = \"{{ index .Values.postgres.system_passwords.pgcat_admin }}\"\n",
+        )
+        .unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule_id == "cred-generic-password"),
+            "Template expressions should not be flagged as hardcoded passwords"
+        );
+    }
+
+    #[test]
+    fn test_skip_secret_label_inside_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("TestS3StorageCommand.php");
+        std::fs::write(
+            &file_path,
+            "$this->line('  Secret: '.($config['secret'] ? 'set' : 'not set'));\n",
+        )
+        .unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "cred-generic-secret"),
+            "A 'Secret:' label inside a string literal is not an assignment"
+        );
+
+        // A quoted assignment inside another quote style still flags.
+        std::fs::write(&file_path, "echo \"SECRET='879454af98949cbda128'\"\n").unwrap();
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(findings.iter().any(|f| f.rule_id == "cred-generic-secret"));
     }
 
     #[test]

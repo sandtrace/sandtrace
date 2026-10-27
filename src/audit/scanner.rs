@@ -515,14 +515,9 @@ pub fn scan_file_content(
             let end = (line_number + 1).min(lines.len());
             let context: Vec<String> = lines[start..end]
                 .iter()
-                .map(|l| {
-                    // Redact the actual match in context
-                    if l.contains(mat.as_str()) {
-                        l.replace(mat.as_str(), "[REDACTED]")
-                    } else {
-                        l.to_string()
-                    }
-                })
+                // Redact every match in context, not just this one: an adjacent
+                // secret line would otherwise print in the clear.
+                .map(|l| regex.replace_all(l, "[REDACTED]").into_owned())
                 .collect();
 
             findings.push(AuditFinding {
@@ -982,6 +977,23 @@ mod tests {
             findings.iter().any(|f| f.rule_id == "cred-env-secret"),
             ".env files should detect unquoted secret/key/token values"
         );
+    }
+
+    #[test]
+    fn test_env_context_redacts_adjacent_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "REVERB_APP_KEY=keyvalue1234567").unwrap();
+        writeln!(file, "REVERB_APP_SECRET=secretvalue1234567").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert_eq!(findings.len(), 2);
+        for f in &findings {
+            let context = f.context_lines.join("\n");
+            assert!(!context.contains("keyvalue"), "leaked: {context}");
+            assert!(!context.contains("secretvalue"), "leaked: {context}");
+        }
     }
 
     #[test]

@@ -11,8 +11,12 @@ use super::{is_language, levenshtein};
 static RE_PREG_REPLACE_E: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"preg_replace\s*\(\s*['"].*?/[a-z]*e[a-z]*['"]\s*,"#).unwrap());
 
-static RE_PROXY_REFLECT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"new\s+Proxy\s*\(|Reflect\.(apply|construct|get)\s*\(").unwrap());
+// Proxy/Reflect on ordinary objects is everyday JS (lazy facades, Vue reactivity,
+// test mocks). The obfuscation vector is wrapping or reaching through a runtime
+// global, e.g. `Reflect.get(globalThis, 'ev' + 'al')` or `Reflect.apply(eval, ...)`.
+static RE_PROXY_REFLECT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(new\s+Proxy|Reflect\.(apply|construct|get))\s*\(\s*(globalThis|window|global|self|process|require|module|Function|eval|document)\b").unwrap()
+});
 
 static RE_JSON_EVAL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)(eval\s*\(|Function\s*\(|javascript\s*:|<script)"#).unwrap());
@@ -163,7 +167,7 @@ pub fn scan_line(
             line_number: Some(line_number),
             rule_id: "obfuscation-proxy-reflect".to_string(),
             severity: Severity::Medium,
-            description: "Proxy/Reflect metaprogramming — can intercept property access"
+            description: "Proxy/Reflect on a runtime global — can hide access to eval/require"
                 .to_string(),
             matched_pattern: "proxy/reflect".to_string(),
             context_lines: vec![truncate_line(line)],
@@ -847,14 +851,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.js");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "const p = new Proxy(target, handler);").unwrap();
+        writeln!(f, "const p = new Proxy(globalThis, handler);").unwrap();
+        writeln!(f, "Reflect.apply(eval, null, [code]);").unwrap();
 
         let mut findings = Vec::new();
         let content = std::fs::read_to_string(&path).unwrap();
         for (i, line) in content.lines().enumerate() {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
-        assert!(findings
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.rule_id == "obfuscation-proxy-reflect")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_proxy_reflect_on_plain_objects_not_flagged() {
+        // Lazy SDK facade and Vitest mocks seen in a Vue app.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("useSdk.ts");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "sdkFacade = new Proxy({{}} as CcPlatformSdk, {{").unwrap();
+        writeln!(f, "const value = Reflect.get(sdk as object, prop, sdk);").unwrap();
+        writeln!(
+            f,
+            "passkeyService: new Proxy({{}}, {{ get: () => vi.fn() }}),"
+        )
+        .unwrap();
+
+        let mut findings = Vec::new();
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in content.lines().enumerate() {
+            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+        }
+        assert!(!findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-proxy-reflect"));
     }

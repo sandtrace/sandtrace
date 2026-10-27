@@ -177,7 +177,8 @@ const ENV_FILE_PATTERNS: &[ContentPattern] = &[ContentPattern {
 }];
 
 /// Check if a file is ignored by git (not tracked and matches .gitignore).
-/// Returns false if not in a git repo or if git check fails.
+/// Returns false if not in a git repo. When git errors out, falls back to the
+/// repo's .gitignore files.
 fn is_git_ignored(path: &Path) -> bool {
     let abs_path = if path.is_absolute() {
         path.to_path_buf()
@@ -187,15 +188,43 @@ fn is_git_ignored(path: &Path) -> bool {
             .unwrap_or_else(|_| path.to_path_buf())
     };
     let dir = abs_path.parent().unwrap_or(Path::new("."));
-    std::process::Command::new("git")
+    let status = std::process::Command::new("git")
         .args(["check-ignore", "-q"])
         .arg(&abs_path)
         .current_dir(dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .ok()
+        .and_then(|s| s.code());
+    match status {
+        Some(0) => true,
+        Some(1) => false,
+        _ => matches_repo_gitignore(&abs_path),
+    }
+}
+
+/// Match `path` against the .gitignore files between it and its repo root.
+/// Used when git can't answer, e.g. a worktree whose `.git` file holds a
+/// Windows `gitdir: D:/...` path that WSL git can't resolve.
+/// shortcut: skips git's tracked-file check, so a force-added file that
+/// matches .gitignore counts as ignored; upgrade if that case shows up.
+fn matches_repo_gitignore(path: &Path) -> bool {
+    let Some(root) = path.ancestors().find(|d| d.join(".git").exists()) else {
+        return false;
+    };
+    for dir in path.ancestors().skip(1) {
+        let (gitignore, _) = ignore::gitignore::Gitignore::new(dir.join(".gitignore"));
+        match gitignore.matched_path_or_any_parents(path, false) {
+            ignore::Match::Ignore(_) => return true,
+            ignore::Match::Whitelist(_) => return false,
+            ignore::Match::None => {}
+        }
+        if dir == root {
+            break;
+        }
+    }
+    false
 }
 
 /// Returns true if the filename follows a well-known test-file naming convention.
@@ -994,6 +1023,30 @@ mod tests {
             assert!(!context.contains("keyvalue"), "leaked: {context}");
             assert!(!context.contains("secretvalue"), "leaked: {context}");
         }
+    }
+
+    #[test]
+    fn test_env_skipped_when_gitignored_in_unresolvable_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        // Worktree created by Windows git: WSL git can't follow this gitdir
+        std::fs::write(
+            dir.path().join(".git"),
+            "gitdir: D:/repo/.git/worktrees/x\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".gitignore"), ".env\n").unwrap();
+        let file_path = dir.path().join(".env");
+        std::fs::write(&file_path, "REVERB_APP_SECRET=secretvalue1234567\n").unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(findings.is_empty(), "gitignored .env should be skipped");
+
+        std::fs::write(dir.path().join(".gitignore"), "vendor\n").unwrap();
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-env-secret"),
+            ".env not in .gitignore should still be scanned"
+        );
     }
 
     #[test]

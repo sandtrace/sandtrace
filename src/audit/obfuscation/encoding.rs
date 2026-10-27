@@ -51,6 +51,18 @@ static RE_GIT_HOOK_SUSPICIOUS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(curl\s|wget\s|eval\s|base64|\|\s*sh|\|\s*bash|python\s+-c|node\s+-e|nc\s+-|ncat\s|mkfifo)").unwrap()
 });
 
+/// True if a `\xNN` run decodes to mostly printable ASCII, i.e. hidden text such as
+/// `"\x65\x76\x61\x6c"` ("eval"). Runs of raw bytes (PNG/JPEG/ICO headers in test
+/// fixtures) are binary data, not hidden code.
+fn hex_run_is_text(run: &str) -> bool {
+    let bytes: Vec<u8> = run
+        .split("\\x")
+        .filter_map(|h| u8::from_str_radix(h, 16).ok())
+        .collect();
+    let printable = bytes.iter().filter(|b| (0x20..0x7f).contains(*b)).count();
+    printable * 2 > bytes.len()
+}
+
 /// Scan a single line for Tier 1 encoding/string manipulation patterns.
 pub fn scan_line(
     line: &str,
@@ -60,7 +72,11 @@ pub fn scan_line(
     findings: &mut Vec<AuditFinding>,
 ) {
     // Rule 1: Hex escape sequences (skip .c/.h/.cpp where hex is common)
-    if !is_language(path, &["c", "h", "cpp", "hpp"]) && RE_HEX_ESCAPE.is_match(line) {
+    if !is_language(path, &["c", "h", "cpp", "hpp"])
+        && RE_HEX_ESCAPE
+            .find_iter(line)
+            .any(|m| hex_run_is_text(m.as_str()))
+    {
         findings.push(AuditFinding {
             file_path: file_path.to_string(),
             line_number: Some(line_number),
@@ -300,6 +316,26 @@ mod tests {
             scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
         }
         assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "obfuscation-hex-escape"));
+    }
+
+    #[test]
+    fn test_hex_escape_binary_magic_not_flagged() {
+        // Image headers from Pest fixtures: binary bytes, not hidden text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ScorecardImportTest.php");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"->toBe("\x00\x00\x01\x00"); // ICO header"#).unwrap();
+        writeln!(f, r#"const PNG = "\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89";"#).unwrap();
+        writeln!(f, r#"Http::response("\xFF\xD8\xFF\xE0\0\x10JFIF\0", 200),"#).unwrap();
+
+        let mut findings = Vec::new();
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in content.lines().enumerate() {
+            scan_line(line, i + 1, &path.to_string_lossy(), &path, &mut findings);
+        }
+        assert!(!findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-hex-escape"));
     }

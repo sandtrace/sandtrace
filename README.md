@@ -34,6 +34,18 @@ cargo build --release
 cp target/release/sandtrace ~/.cargo/bin/
 ```
 
+### Docker (Windows, macOS)
+
+`audit`, `scan` and `sbom` run from the image. Mount the repo at `/src`:
+
+```powershell
+docker run --rm -v "${PWD}:/src:ro" ghcr.io/sandtrace/sandtrace audit /src
+```
+
+Findings show paths under `/src`. To use your global config and
+`.sandtraceignore`, add `-v "$HOME/.sandtrace:/home/sandtrace/.sandtrace:ro"`.
+`run` and `watch` need Linux and don't work in the image.
+
 ### Initialize
 
 ```bash

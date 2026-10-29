@@ -27,7 +27,7 @@ These rules detect code obfuscation techniques used in supply-chain attacks. The
 | `obfuscation-hidden-content` | Critical | Content hidden past column 200 |
 | `obfuscation-invisible-chars` | Critical | Zero-width unicode characters (U+200B, U+FEFF, U+2060, etc.) |
 | `obfuscation-base64` | Medium | Large base64-encoded blobs in source files |
-| `obfuscation-homoglyph` | High | Cyrillic/Greek homoglyphs mixed with ASCII |
+| `obfuscation-homoglyph` | High | Cyrillic/Greek letters next to ASCII letters in the same word (Cyrillic `а` inside `paypal`) |
 
 ### Tier 1 — Encoding & string manipulation
 

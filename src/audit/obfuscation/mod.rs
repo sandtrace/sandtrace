@@ -581,7 +581,20 @@ fn check_homoglyphs(
 
         let mut found_homoglyphs = Vec::new();
 
-        for ch in line.chars() {
+        let chars: Vec<char> = line.chars().collect();
+        // A Latin letter right after a backslash is an escape (\n, \r), not part of a word.
+        let is_latin =
+            |j: usize| chars[j].is_ascii_alphabetic() && (j == 0 || chars[j - 1] != '\\');
+
+        for (j, &ch) in chars.iter().enumerate() {
+            // Only a lookalike spliced into a Latin word (Cyrillic `а` in `paypal`) is
+            // suspicious. Greek or Cyrillic text that stands apart (GSM alphabet tables,
+            // i18n strings) is not.
+            let touches_latin =
+                (j > 0 && is_latin(j - 1)) || (j + 1 < chars.len() && is_latin(j + 1));
+            if !touches_latin {
+                continue;
+            }
             for (start, end, script) in HOMOGLYPH_RANGES {
                 if ch >= *start && ch <= *end {
                     found_homoglyphs.push(format!("U+{:04X} ({})", ch as u32, script));
@@ -590,22 +603,18 @@ fn check_homoglyphs(
         }
 
         if !found_homoglyphs.is_empty() {
-            // Only flag if the file also contains ASCII — a mixed-script file is suspicious
-            let has_ascii = line.chars().any(|c| c.is_ascii_alphabetic());
-            if has_ascii {
-                findings.push(AuditFinding {
-                    file_path: file_path.to_string(),
-                    line_number: Some(line_number),
-                    rule_id: "obfuscation-homoglyph".to_string(),
-                    severity: Severity::High,
-                    description: format!(
-                        "Unicode homoglyph characters mixed with ASCII: {}",
-                        found_homoglyphs.join(", ")
-                    ),
-                    matched_pattern: "mixed-script homoglyphs".to_string(),
-                    context_lines: vec![line.to_string()],
-                });
-            }
+            findings.push(AuditFinding {
+                file_path: file_path.to_string(),
+                line_number: Some(line_number),
+                rule_id: "obfuscation-homoglyph".to_string(),
+                severity: Severity::High,
+                description: format!(
+                    "Unicode homoglyph characters mixed with ASCII: {}",
+                    found_homoglyphs.join(", ")
+                ),
+                matched_pattern: "mixed-script homoglyphs".to_string(),
+                context_lines: vec![line.to_string()],
+            });
         }
     }
 }
@@ -721,7 +730,7 @@ mod tests {
         let mut file = std::fs::File::create(&file_path).unwrap();
         write!(
             file,
-            "// @sandtrace-ignore\nconst text = `\u{03B8} angle \u{03C6} phi`;\n"
+            "// @sandtrace-ignore\nconst url = `https://p\u{0430}ypal.com`;\n"
         )
         .unwrap();
 
@@ -739,12 +748,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("test.ts");
         let mut file = std::fs::File::create(&file_path).unwrap();
-        write!(file, "const text = `\u{03B8} angle \u{03C6} phi`;\n").unwrap();
+        write!(file, "const url = `https://p\u{0430}ypal.com`;\n").unwrap();
 
         let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
         assert!(findings
             .iter()
             .any(|f| f.rule_id == "obfuscation-homoglyph"));
+    }
+
+    #[test]
+    fn test_homoglyph_not_flagged_when_standalone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        // GSM 03.38 alphabet: Greek capitals between non-Latin chars and after \r / \n escapes.
+        writeln!(
+            file,
+            "private const string GSM7 = \"@\\nØø\\rÅå\u{0394}_\u{03A6}\u{0393}\u{039E}Ææ\\n\u{0394}\";"
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "'70 UCS-2' => [str_repeat('\u{0436}', 70), 'UCS-2', 1],"
+        )
+        .unwrap();
+        writeln!(file, "const text = `\u{03B8} angle \u{03C6} phi`;").unwrap();
+
+        let findings = scan_file(&file_path, &test_obfuscation_config()).unwrap();
+        let homoglyphs: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id == "obfuscation-homoglyph")
+            .collect();
+        assert!(homoglyphs.is_empty(), "unexpected: {homoglyphs:?}");
     }
 
     #[test]

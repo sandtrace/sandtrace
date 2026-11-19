@@ -315,6 +315,16 @@ fn is_keyword_inside_string(prefix: &str, matched: &str) -> bool {
         .is_some_and(|q| prefix.matches(q).count() % 2 == 1)
 }
 
+/// Returns true if the line is a comment or docblock line
+/// (e.g. ` * issues a password: "Save|<nonce>"` in a PHPDoc block).
+/// shortcut: line-leading markers only, trailing `// ...` comments still scanned.
+fn is_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    ["//", "/*", "*", "#", "--"]
+        .iter()
+        .any(|m| t.starts_with(m))
+}
+
 pub fn scan_file_content(
     path: &Path,
     config: &SandtraceConfig,
@@ -512,6 +522,17 @@ pub fn scan_file_content(
             let line_start = content[..mat.start()].rfind('\n').map_or(0, |p| p + 1);
             if is_keyword_inside_string(&content[line_start..mat.start()], mat.as_str()) {
                 continue;
+            }
+
+            // Keyword-based rules match prose in comments; fixed-format key rules
+            // (AWS, GitHub, Stripe, ...) still fire on comment lines.
+            if pattern_def.rule_id.starts_with("cred-generic-") {
+                let line_end = content[line_start..]
+                    .find('\n')
+                    .map_or(content.len(), |p| line_start + p);
+                if is_comment_line(&content[line_start..line_end]) {
+                    continue;
+                }
             }
 
             // Skip matches where the matched content or surrounding lines contain redaction markers.
@@ -1108,6 +1129,35 @@ mod tests {
             findings.is_empty(),
             "Test files should be skipped entirely, got {:?}",
             findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_skip_generic_password_in_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("User.php");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "     * AKIAZ7Q2M4N8P3R6T5V1").unwrap();
+        writeln!(file, "    /**").unwrap();
+        writeln!(
+            file,
+            r#"     * Only TokenHelpers::generateAccessToken issues a password: "Save|<nonce>","#
+        )
+        .unwrap();
+        writeln!(file, r#"    // $password = "hunter2hunter2";"#).unwrap();
+        writeln!(file, r#"# secret: "abcdefghijkl""#).unwrap();
+        writeln!(file, r#"$password = "hunter2hunter2";"#).unwrap();
+
+        let findings = scan_file_content(&file_path, &test_config()).unwrap();
+        let generic: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id.starts_with("cred-generic-"))
+            .map(|f| f.line_number)
+            .collect();
+        assert_eq!(generic, vec![Some(6)], "only the code line should flag");
+        assert!(
+            findings.iter().any(|f| f.rule_id == "cred-aws-key"),
+            "fixed-format keys must still flag inside comments"
         );
     }
 
